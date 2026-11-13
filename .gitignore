@@ -1,0 +1,14 @@
+# Bytecode & OS artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.DS_Store
+
+# Local workspace / harness scratch state
+.scratch/
+.agents/
+.claude/
+skills-lock.json
+
+# Release build artifacts (upload to GitHub Releases instead of committing binaries)
+dist/

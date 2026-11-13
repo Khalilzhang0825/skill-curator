@@ -1,0 +1,11 @@
+{
+  "skill-curator-intercept": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "python3 ./skills/skill-curator/scripts/hook_intercept.py",
+        "timeout": 10
+      }
+    ]
+  }
+}
