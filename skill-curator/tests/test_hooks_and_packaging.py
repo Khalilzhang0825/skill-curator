@@ -159,7 +159,7 @@ class TestHooksAndPackaging(unittest.TestCase):
         # 1) Manifests
         agy_manifest = json.loads((PLUGIN_ROOT / "plugin.json").read_text(encoding="utf-8"))
         self.assertEqual(agy_manifest["name"], "skill-curator")
-        self.assertEqual(agy_manifest["version"], "0.1.1")
+        self.assertEqual(agy_manifest["version"], "0.1.2")
         self.assertLessEqual(
             set(agy_manifest.keys()),
             {
@@ -182,7 +182,7 @@ class TestHooksAndPackaging(unittest.TestCase):
             (PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
         )
         self.assertEqual(claude_manifest["name"], "skill-curator")
-        self.assertEqual(claude_manifest["version"], "0.1.1")
+        self.assertEqual(claude_manifest["version"], "0.1.2")
 
         # 2) Antigravity hooks.json + shell execution from plugin root
         agy_hooks = json.loads((PLUGIN_ROOT / "hooks.json").read_text(encoding="utf-8"))

@@ -20,10 +20,21 @@ from common import (
     STANDARD_HARNESS_SPECS,
     CuratorError,
     copy_tree_clean,
+    discover_skills_in_dir,
+    extract_frontmatter_repo_source,
+    extract_markdown_body,
+    find_enclosing_symlink_container,
+    has_symlink_component,
+    inspect_ancestor_repo_provenance,
+    is_plugin_bundle_dir,
+    normalize_repo_source,
+    normalize_slug,
     parse_frontmatter,
     read_index_rows,
+    read_skills_lock_sources,
     resolve_home_dir,
     rewrite_frontmatter_description,
+    rmtree_safe,
     tree_content_digest,
     upsert_index_row,
     utc_now_iso,
@@ -100,21 +111,12 @@ def discover_standard_global_dirs(home_dir: Path | None = None) -> list[dict[str
     results: list[dict[str, Any]] = []
     for item in entries:
         parent = Path(item["path"])
-        skill_count = 0
-        excluded: list[str] = []
-        for child in sorted(parent.iterdir(), key=lambda p: p.name):
-            if not child.is_dir() or child.name == "skill-curator":
-                continue
-            if is_plugin_bundle_dir(child):
-                excluded.append(child.name)
-                continue
-            if (child / "SKILL.md").is_file():
-                skill_count += 1
+        discovered, excluded = discover_skills_in_dir(parent)
         results.append(
             {
                 "harness": item["harness"],
                 "path": item["path"],
-                "skill_count": skill_count,
+                "skill_count": len(discovered),
                 "excluded_bundles": excluded,
             }
         )
@@ -218,6 +220,280 @@ def _store_to_vault_preserving_source(
     return vault_skill_dir, vault_meta
 
 
+GENERIC_SKILL_REPO_NAMES = frozenset(
+    {
+        "skills",
+        "agent-skills",
+        "claude-skills",
+        "ai-skills",
+        "codex-skills",
+        "cursor-skills",
+        "prompts",
+    }
+)
+_CROSSREF_CONTEXT_RE = re.compile(r"\b(?:skill|skills|invoke|run|use)\b", re.IGNORECASE)
+
+
+def suite_scene_tag_for_repo(source_repo: str) -> str:
+    """Derive deterministic Suite Scene Tag from a normalized source_repo identifier."""
+    if source_repo.startswith("inferred-suite:"):
+        anchor = normalize_slug(source_repo.split(":", 1)[1]) or "companion"
+        return f"{anchor}-suite"
+    if source_repo.startswith("container:"):
+        return normalize_slug(source_repo.split(":", 1)[1]) or "companion-suite"
+    if source_repo.startswith("local-git:"):
+        parts = source_repo.split(":")
+        return normalize_slug(parts[1]) if len(parts) > 1 else "local-suite"
+    if source_repo.startswith("file://"):
+        tail = normalize_slug(Path(source_repo[7:]).name) or "local"
+        return tail if tail.endswith("-suite") else f"{tail}-suite"
+    parts = [p for p in source_repo.split("/") if p]
+    if len(parts) >= 3:
+        owner, repo = parts[-2], parts[-1]
+        if repo.lower() in GENERIC_SKILL_REPO_NAMES:
+            return normalize_slug(f"{owner}-{repo}") or "companion-suite"
+        return normalize_slug(repo) or "companion-suite"
+    return normalize_slug(parts[-1]) if parts else "companion-suite"
+
+
+def _body_mentions_skill(body: str, target_slug: str) -> bool:
+    """Return True if markdown body intentionally references target_slug as a companion skill."""
+    if not body or not target_slug:
+        return False
+    esc = re.escape(target_slug)
+    slash_or_path = re.compile(
+        rf"(?:(?<![A-Za-z0-9_:/.-])/|(?<![A-Za-z0-9_:/.-])(?:skills|\.\.)/){esc}(?![A-Za-z0-9_/-])",
+        re.IGNORECASE,
+    )
+    if slash_or_path.search(body):
+        return True
+    backtick_re = re.compile(rf"`{esc}`", re.IGNORECASE)
+    if "-" in target_slug:
+        if backtick_re.search(body):
+            return True
+        if len(target_slug) >= 6:
+            slug_re = re.compile(rf"(?<![A-Za-z0-9_/-]){esc}(?![A-Za-z0-9_/-])", re.IGNORECASE)
+            if slug_re.search(body):
+                return True
+    else:
+        for match in backtick_re.finditer(body):
+            window = body[max(0, match.start() - 32) : min(len(body), match.end() + 32)]
+            if _CROSSREF_CONTEXT_RE.search(window):
+                return True
+    return False
+
+
+def _attribute_repos_for_scan(
+    grouped: dict[str, dict[str, Any]],
+    *,
+    vault_skills_dir: Path | None,
+    index_rows: dict[str, dict[str, Any]],
+    lock_sources: dict[str, tuple[str, str]],
+    home_dir: Path | None = None,
+) -> None:
+    """Resolve 8-signal repo attribution across discovered skills without merging conflicting repos."""
+    for skill_name, bucket in grouped.items():
+        source_repo: str | None = None
+        source_url = ""
+        signal: str | None = None
+
+        anc_signals: dict[str, tuple[str, str]] = {}
+        for entry_path, parent_path in bucket.get("_ancestor_candidates", []):
+            found_anc = inspect_ancestor_repo_provenance(
+                entry_path,
+                skill_name=skill_name,
+                harness_parent=parent_path,
+                home_dir=home_dir,
+            )
+            for k, v in found_anc.items():
+                anc_signals.setdefault(k, v)
+
+        # Signal 1: .curator-meta.json on active copies
+        for cand_url in bucket.get("_meta_urls", []):
+            repo_key, canonical_url = normalize_repo_source(cand_url)
+            if repo_key:
+                source_repo, source_url, signal = repo_key, canonical_url, "curator-meta"
+                break
+
+        # Signal 2: Vault INDEX.md / Vault .curator-meta.json
+        if not source_repo:
+            vault_meta = (
+                _read_json_dict(vault_skills_dir / skill_name / ".curator-meta.json")
+                if vault_skills_dir is not None
+                else {}
+            )
+            row = index_rows.get(skill_name, {})
+            for cand_url in (row.get("source_url", ""), vault_meta.get("source_url", "")):
+                if isinstance(cand_url, str) and cand_url.strip():
+                    repo_key, canonical_url = normalize_repo_source(cand_url)
+                    if repo_key:
+                        source_repo, source_url, signal = repo_key, canonical_url, "vault-index"
+                        break
+
+        # Signal 3: npx skills lockfile (.agents/.skill-lock.json or ancestor lockfile)
+        if not source_repo:
+            if skill_name in lock_sources:
+                repo_key, canonical_url = lock_sources[skill_name]
+                source_repo, source_url, signal = repo_key, canonical_url, "skills-lock"
+            elif "skills-lock" in anc_signals:
+                repo_key, canonical_url = anc_signals["skills-lock"]
+                source_repo, source_url, signal = repo_key, canonical_url, "skills-lock"
+
+        # Signal 4: enclosing .git/config or worktree/submodule origin remote
+        if not source_repo and "git-origin" in anc_signals:
+            repo_key, canonical_url = anc_signals["git-origin"]
+            source_repo, source_url, signal = repo_key, canonical_url, "git-origin"
+
+        # Signal 5: SKILL.md YAML frontmatter
+        if not source_repo and bucket.get("_primary_skill_md"):
+            fm_url = extract_frontmatter_repo_source(Path(bucket["_primary_skill_md"]))
+            if fm_url:
+                repo_key, canonical_url = normalize_repo_source(fm_url)
+                if repo_key:
+                    source_repo, source_url, signal = repo_key, canonical_url, "frontmatter"
+
+        # Signal 6: ancestor package.json repository
+        if not source_repo and "package-json" in anc_signals:
+            repo_key, canonical_url = anc_signals["package-json"]
+            source_repo, source_url, signal = repo_key, canonical_url, "package-json"
+
+        bucket["source_repo"] = source_repo
+        bucket["source_url"] = source_url
+        bucket["attribution_signal"] = signal
+        bucket["_git_local"] = anc_signals.get("git-local")
+
+    # Signal 7a: local .git repo without remote URL
+    for bucket in grouped.values():
+        if bucket["source_repo"] is None and bucket.get("_git_local"):
+            repo_key, canonical_url = bucket["_git_local"]
+            bucket["source_repo"] = repo_key
+            bucket["source_url"] = canonical_url
+            bucket["attribution_signal"] = "git-local"
+
+    # Signal 7b: shared nested top_container (unzipped archive / bundle dir without .git)
+    containers_map: dict[str, tuple[Path, list[str]]] = {}
+    for skill_name, bucket in grouped.items():
+        for container_path in bucket.get("_containers", []):
+            if container_path is None:
+                continue
+            ckey = os.path.normcase(os.path.normpath(os.path.abspath(str(container_path))))
+            entry = containers_map.setdefault(ckey, (container_path, []))
+            if skill_name not in entry[1]:
+                entry[1].append(skill_name)
+
+    for container_path, c_members in containers_map.values():
+        explicit_repos = {
+            (grouped[m]["source_repo"], grouped[m]["source_url"])
+            for m in c_members
+            if grouped[m]["source_repo"] and grouped[m]["attribution_signal"] != "git-local"
+        }
+        if len(explicit_repos) == 1:
+            inferred_repo, inferred_url = next(iter(explicit_repos))
+            for m in c_members:
+                if not grouped[m]["source_repo"] or grouped[m]["attribution_signal"] == "git-local":
+                    grouped[m]["source_repo"] = inferred_repo
+                    grouped[m]["source_url"] = inferred_url
+                    grouped[m]["attribution_signal"] = "container-dir"
+        elif len(explicit_repos) == 0:
+            unattr = [m for m in c_members if not grouped[m]["source_repo"]]
+            if len(unattr) >= 2:
+                c_repo = f"container:{normalize_slug(container_path.name) or 'suite'}"
+                for m in unattr:
+                    grouped[m]["source_repo"] = c_repo
+                    grouped[m]["source_url"] = ""
+                    grouped[m]["attribution_signal"] = "container-dir"
+
+    # Signal 8: SKILL.md cross-reference connected components (only for unattributed skills)
+    names_sorted = sorted(grouped.keys())
+    bodies: dict[str, str] = {}
+    for name in names_sorted:
+        p = grouped[name].get("_primary_skill_md")
+        bodies[name] = extract_markdown_body(Path(p)) if p else ""
+
+    adj: dict[str, set[str]] = {name: set() for name in names_sorted}
+    for src_name in names_sorted:
+        body = bodies[src_name]
+        if not body:
+            continue
+        for dst_name in names_sorted:
+            if src_name == dst_name:
+                continue
+            if _body_mentions_skill(body, dst_name):
+                adj[src_name].add(dst_name)
+                adj[dst_name].add(src_name)
+
+    visited: set[str] = set()
+    for start in names_sorted:
+        if grouped[start]["source_repo"] is not None or start in visited:
+            continue
+        component: list[str] = []
+        touching_attributed: dict[str, str] = {}
+        stack = [start]
+        visited.add(start)
+        while stack:
+            cur = stack.pop()
+            component.append(cur)
+            for nb in adj[cur]:
+                nb_repo = grouped[nb]["source_repo"]
+                if nb_repo is not None:
+                    touching_attributed[nb_repo] = grouped[nb]["source_url"]
+                elif nb not in visited:
+                    visited.add(nb)
+                    stack.append(nb)
+
+        if len(touching_attributed) == 1:
+            inferred_repo, inferred_url = next(iter(touching_attributed.items()))
+            for member in component:
+                grouped[member]["source_repo"] = inferred_repo
+                grouped[member]["source_url"] = inferred_url
+                grouped[member]["attribution_signal"] = "cross-reference"
+        elif len(component) >= 2:
+            anchor = sorted(component)[0]
+            inferred_repo = f"inferred-suite:{anchor}"
+            for member in component:
+                grouped[member]["source_repo"] = inferred_repo
+                grouped[member]["source_url"] = ""
+                grouped[member]["attribution_signal"] = "cross-reference"
+
+
+def _resolve_source_url_for_action(
+    *,
+    explicit_url: str = "",
+    skill_name: str,
+    skill_md_path: Path | None,
+    lock_sources: dict[str, tuple[str, str]],
+    skill_dir: Path | None = None,
+    harness_parent: Path | None = None,
+    home_dir: Path | None = None,
+) -> str:
+    """Resolve and normalize canonical source_url for adopt/demote/remediate."""
+    if explicit_url and explicit_url.strip():
+        _, canonical = normalize_repo_source(explicit_url.strip())
+        return canonical or explicit_url.strip()
+    if skill_name in lock_sources:
+        return lock_sources[skill_name][1]
+    target_dir = skill_dir or (skill_md_path.parent if skill_md_path is not None else None)
+    anc_signals: dict[str, tuple[str, str]] = {}
+    if target_dir is not None and target_dir.exists():
+        anc_signals = inspect_ancestor_repo_provenance(
+            target_dir,
+            skill_name=skill_name,
+            harness_parent=harness_parent,
+            home_dir=home_dir,
+        )
+    if "skills-lock" in anc_signals:
+        return anc_signals["skills-lock"][1]
+    if "git-origin" in anc_signals:
+        return anc_signals["git-origin"][1]
+    if skill_md_path is not None and skill_md_path.is_file():
+        fm_url = extract_frontmatter_repo_source(skill_md_path)
+        if fm_url:
+            return fm_url
+    if "package-json" in anc_signals:
+        return anc_signals["package-json"][1]
+    return ""
+
+
 def scan_local_skills(
     *,
     cfg: dict[str, Any] | None = None,
@@ -243,26 +519,20 @@ def scan_local_skills(
         scan_dirs=scan_dirs,
         project_dir=project_dir,
     )
+    lock_sources = read_skills_lock_sources(home_dir=home_dir, project_dir=project_dir)
 
     discovered_dirs: list[dict[str, Any]] = []
     grouped: dict[str, dict[str, Any]] = {}
 
     for dspec in dir_specs:
         parent = Path(dspec["path"])
-        excluded_bundles: list[str] = []
+        entries, excluded_bundles = discover_skills_in_dir(parent)
         skill_count = 0
 
-        for entry in sorted(parent.iterdir(), key=lambda p: p.name):
-            if not entry.is_dir():
-                continue
-            if entry.name == "skill-curator":
-                continue
-            if is_plugin_bundle_dir(entry):
-                excluded_bundles.append(entry.name)
-                continue
-            if not (entry / "SKILL.md").is_file():
-                continue
-
+        for ent in entries:
+            entry = ent["path"]
+            skill_name = ent["name"]
+            top_container = ent["top_container"]
             skill_count += 1
             containment_error = None
             try:
@@ -274,8 +544,15 @@ def scan_local_skills(
             scripts_detected = detect_scripts(entry)
             digest = tree_content_digest(entry)
             meta = _read_json_dict(entry / ".curator-meta.json")
-            tracked = bool(meta.get("mounted_at") or meta.get("mounted_from_vault"))
-            skill_name = entry.name
+            in_vault = bool(
+                vault_skills_dir and (vault_skills_dir / skill_name / "SKILL.md").is_file()
+            )
+            is_symlinked = has_symlink_component(entry, parent)
+            tracked = bool(
+                meta.get("mounted_at")
+                or meta.get("mounted_from_vault")
+                or (is_symlinked and in_vault)
+            )
 
             loc = {
                 "tier": dspec["tier"],
@@ -291,9 +568,6 @@ def scan_local_skills(
 
             bucket = grouped.get(skill_name)
             if bucket is None:
-                in_vault = bool(
-                    vault_skills_dir and (vault_skills_dir / skill_name / "SKILL.md").is_file()
-                )
                 row = index_rows.get(skill_name, {})
                 sug_kw, sug_tags = suggest_keywords_and_tags(
                     skill_name,
@@ -313,9 +587,19 @@ def scan_local_skills(
                     "suggested_keywords": sug_kw,
                     "suggested_scene_tags": sug_tags,
                     "_tokens": extract_tokens(f"{skill_name} {quality['description']}"),
+                    "_meta_urls": [],
+                    "_primary_skill_md": str(entry / "SKILL.md"),
+                    "_ancestor_candidates": [],
+                    "_containers": [],
                 }
                 grouped[skill_name] = bucket
 
+            bucket["_ancestor_candidates"].append((entry, parent))
+            if top_container is not None:
+                bucket["_containers"].append(top_container)
+            raw_meta_url = meta.get("source_url")
+            if isinstance(raw_meta_url, str) and raw_meta_url.strip():
+                bucket["_meta_urls"].append(raw_meta_url.strip())
             bucket["tiers"].add(dspec["tier"])
             bucket["locations"].append(loc)
             if tracked:
@@ -334,6 +618,28 @@ def scan_local_skills(
                 "excluded_bundles": excluded_bundles,
             }
         )
+
+    _attribute_repos_for_scan(
+        grouped,
+        vault_skills_dir=vault_skills_dir,
+        index_rows=index_rows,
+        lock_sources=lock_sources,
+        home_dir=home_dir,
+    )
+    repo_members: dict[str, list[str]] = {}
+    for sname in sorted(grouped.keys()):
+        repo = grouped[sname].get("source_repo")
+        if repo:
+            repo_members.setdefault(repo, []).append(sname)
+    for repo, members in repo_members.items():
+        if len(members) >= 2:
+            suite_tag = suite_scene_tag_for_repo(repo)
+            for member in members:
+                existing_tags = grouped[member]["suggested_scene_tags"]
+                updated_tags = [suite_tag] + [
+                    t for t in existing_tags if t != suite_tag and t != "general"
+                ]
+                grouped[member]["suggested_scene_tags"] = updated_tags[:4]
 
     skills_out: list[dict[str, Any]] = []
     cross_harness_duplicates: list[dict[str, Any]] = []
@@ -413,6 +719,10 @@ def scan_local_skills(
                 "scripts_detected": sorted(b["scripts_detected"]),
                 "suggested_keywords": b["suggested_keywords"],
                 "suggested_scene_tags": b["suggested_scene_tags"],
+                "source_repo": b["source_repo"],
+                "source_url": b["source_url"],
+                "source_repo_signal": b["attribution_signal"],
+                "attribution_signal": b["attribution_signal"],
             }
         )
 
@@ -475,40 +785,127 @@ def scan_local_skills(
                     "suggested_keywords": b["suggested_keywords"],
                     "suggested_scene_tags": b["suggested_scene_tags"],
                     "locations": [loc["path"] for loc in g_locs],
+                    "source_repo": b["source_repo"],
+                    "source_url": b["source_url"],
                 }
             )
         else:
             clean_global.append(name)
 
-    # Prefer tracked / warning-free skills first inside the Global Core cap.
-    clean_global.sort(
-        key=lambda n: (
-            0 if grouped[n]["tracked"] else 1,
-            1 if grouped[n]["quality"]["issues"] else 0,
-            n,
+    # Group clean global skills atomically by source_repo so companion suites stay together.
+    grouped_clean_repos: dict[str, list[str]] = {}
+    atomic_units: list[list[str]] = []
+    for name in clean_global:
+        repo = grouped[name].get("source_repo")
+        if repo:
+            grouped_clean_repos.setdefault(repo, []).append(name)
+        else:
+            atomic_units.append([name])
+    for members in grouped_clean_repos.values():
+        atomic_units.append(sorted(members))
+
+    # Prefer tracked units first, then cohesive suites (>=2), then warning-free, then larger groups.
+    atomic_units.sort(
+        key=lambda members: (
+            0 if any(grouped[n]["tracked"] for n in members) else 1,
+            0 if len(members) >= 2 else 1,
+            1 if any(grouped[n]["quality"]["issues"] for n in members) else 0,
+            -len(members),
+            sorted(members)[0],
         )
     )
-    for name in clean_global[:global_cap]:
-        b = grouped[name]
-        keep_and_adopt.append(
+
+    used_slots = 0
+    keep_units: list[list[str]] = []
+    demote_units: list[list[str]] = []
+    has_kept_oversized_suite = False
+    soft_cap_exceeded = False
+    for members in atomic_units:
+        ordered_members = sorted(members)
+        any_tracked = any(grouped[n]["tracked"] for n in ordered_members)
+        if (
+            (not soft_cap_exceeded and used_slots + len(ordered_members) <= global_cap)
+            or any_tracked
+            or (len(ordered_members) > global_cap and not has_kept_oversized_suite)
+        ):
+            keep_units.append(ordered_members)
+            used_slots += len(ordered_members)
+            if len(ordered_members) > global_cap:
+                has_kept_oversized_suite = True
+            soft_cap_exceeded = used_slots > global_cap
+        else:
+            demote_units.append(ordered_members)
+
+    for members in keep_units:
+        for name in members:
+            b = grouped[name]
+            keep_and_adopt.append(
+                {
+                    "name": name,
+                    "suggested_keywords": b["suggested_keywords"],
+                    "suggested_scene_tags": b["suggested_scene_tags"],
+                    "locations": [loc["path"] for loc in b["locations"] if loc["tier"] == "global"],
+                    "source_repo": b["source_repo"],
+                    "source_url": b["source_url"],
+                }
+            )
+    for members in demote_units:
+        demote_reason = "over_global_cap_repo_group" if len(members) > 1 else "over_global_cap"
+        for name in members:
+            b = grouped[name]
+            demote_to_vault.append(
+                {
+                    "name": name,
+                    "reason": demote_reason,
+                    "suggested_keywords": b["suggested_keywords"],
+                    "suggested_scene_tags": b["suggested_scene_tags"],
+                    "locations": [loc["path"] for loc in b["locations"] if loc["tier"] == "global"],
+                    "source_repo": b["source_repo"],
+                    "source_url": b["source_url"],
+                }
+            )
+
+    keep_name_set = {item["name"] for item in keep_and_adopt}
+    demote_name_set = {item["name"] for item in demote_to_vault}
+    repo_groups: list[dict[str, Any]] = []
+    for repo in sorted(repo_members.keys()):
+        members = repo_members[repo]
+        if len(members) < 2:
+            continue
+        g_members = [
+            n for n in members if any(loc["tier"] == "global" for loc in grouped[n]["locations"])
+        ]
+        p_members = [
+            n for n in members if any(loc["tier"] == "project" for loc in grouped[n]["locations"])
+        ]
+        if g_members:
+            if all(n in keep_name_set for n in g_members):
+                disposition = "keep_and_adopt"
+            elif all(n in demote_name_set for n in g_members):
+                disposition = "demote_to_vault"
+            else:
+                disposition = "mixed"
+        else:
+            disposition = "project_only"
+        bloated_members = [
+            n for n in members if "instruction_bloat" in grouped[n]["quality"]["issues"]
+        ]
+        repo_groups.append(
             {
-                "name": name,
-                "suggested_keywords": b["suggested_keywords"],
-                "suggested_scene_tags": b["suggested_scene_tags"],
-                "locations": [loc["path"] for loc in b["locations"] if loc["tier"] == "global"],
+                "source_repo": repo,
+                "source_url": grouped[members[0]]["source_url"],
+                "signal": grouped[members[0]]["attribution_signal"],
+                "suite_scene_tag": suite_scene_tag_for_repo(repo),
+                "skills": members,
+                "global_skills": g_members,
+                "project_skills": p_members,
+                "bloated_skills": bloated_members,
+                "recommended_disposition": disposition,
             }
         )
-    for name in clean_global[global_cap:]:
-        b = grouped[name]
-        demote_to_vault.append(
-            {
-                "name": name,
-                "reason": "over_global_cap",
-                "suggested_keywords": b["suggested_keywords"],
-                "suggested_scene_tags": b["suggested_scene_tags"],
-                "locations": [loc["path"] for loc in b["locations"] if loc["tier"] == "global"],
-            }
-        )
+
+    soft_cap_exceeded = len(keep_and_adopt) > global_cap
+    recommended_global_cap = max(global_cap, len(keep_and_adopt))
 
     return {
         "ok": True,
@@ -517,6 +914,7 @@ def scan_local_skills(
         "global_cap": global_cap,
         "discovered_dirs": discovered_dirs,
         "skills": skills_out,
+        "repo_groups": repo_groups,
         "diagnosis": {
             "cap_violations": cap_violations,
             "cross_harness_duplicates": cross_harness_duplicates,
@@ -530,8 +928,52 @@ def scan_local_skills(
             "keep_and_adopt": keep_and_adopt,
             "demote_to_vault": demote_to_vault,
             "review_warnings": review_warnings,
+            "repo_groups": repo_groups,
+            "soft_cap_exceeded": soft_cap_exceeded,
+            "recommended_global_cap": recommended_global_cap,
         },
     }
+
+
+def _find_active_skill_entries(
+    *,
+    skill_name: str,
+    tier: str,
+    cfg: dict[str, Any],
+    home_dir: Path | None,
+    scan_dirs: list[str] | None,
+    project_dir: Path | None,
+) -> list[tuple[Path, Path]]:
+    """Locate active (skill_path, harness_parent) entries matching skill_name."""
+    if tier == "project":
+        proj = project_dir if project_dir is not None else Path.cwd().resolve()
+        parents = [proj / ".agents" / "skills", proj / ".claude" / "skills"]
+    else:
+        dir_specs = discover_harness_directories(
+            home_dir=home_dir,
+            configured_dirs=cfg.get("global_core_dirs"),
+            scan_dirs=scan_dirs,
+        )
+        parents = [Path(d["path"]) for d in dir_specs if d["tier"] == "global"]
+
+    found: list[tuple[Path, Path]] = []
+    seen_paths: set[str] = set()
+    for parent in parents:
+        cand = parent / skill_name
+        if (cand.exists() or os.path.islink(str(cand))) and is_plugin_bundle_dir(cand):
+            raise CuratorError(f"Refusing to adopt/modify external plugin bundle '{cand.name}'.")
+        entries, _ = discover_skills_in_dir(parent)
+        for ent in entries:
+            if ent["name"] != skill_name:
+                continue
+            epath = ent["path"]
+            if is_plugin_bundle_dir(epath):
+                raise CuratorError(f"Refusing to adopt/modify external plugin bundle '{epath.name}'.")
+            ekey = os.path.normcase(os.path.normpath(os.path.abspath(str(epath))))
+            if ekey not in seen_paths:
+                seen_paths.add(ekey)
+                found.append((epath, parent))
+    return found
 
 
 def _find_active_skill_paths(
@@ -544,25 +986,17 @@ def _find_active_skill_paths(
     project_dir: Path | None,
 ) -> list[Path]:
     """Locate active mount directories matching skill_name in the requested tier."""
-    if tier == "project":
-        proj = project_dir if project_dir is not None else Path.cwd().resolve()
-        parents = [proj / ".agents" / "skills", proj / ".claude" / "skills"]
-    else:
-        dir_specs = discover_harness_directories(
+    return [
+        p
+        for p, _ in _find_active_skill_entries(
+            skill_name=skill_name,
+            tier=tier,
+            cfg=cfg,
             home_dir=home_dir,
-            configured_dirs=cfg.get("global_core_dirs"),
             scan_dirs=scan_dirs,
+            project_dir=project_dir,
         )
-        parents = [Path(d["path"]) for d in dir_specs if d["tier"] == "global"]
-
-    found: list[Path] = []
-    for parent in parents:
-        cand = parent / skill_name
-        if cand.exists() or cand.is_symlink():
-            if is_plugin_bundle_dir(cand):
-                raise CuratorError(f"Refusing to adopt/modify external plugin bundle '{cand.name}'.")
-            found.append(cand)
-    return found
+    ]
 
 
 def adopt_skill(
@@ -581,18 +1015,19 @@ def adopt_skill(
 ) -> dict[str, Any]:
     """Back up kept local skill(s) into Skill Vault and stamp provenance on active copies."""
     if source_dir is not None:
-        resolved_src = Path(os.path.expanduser(str(source_dir))).resolve()
+        resolved_src = Path(os.path.expanduser(str(source_dir)))
         if resolved_src.name == "skill-curator" or is_plugin_bundle_dir(resolved_src):
             raise CuratorError(f"Refusing to adopt protected skill or bundle '{resolved_src.name}'.")
         validate_tree_containment(resolved_src)
         fm = parse_frontmatter(resolved_src / "SKILL.md")
         skill_name = validate_skill_name(raw_name or fm.get("name") or resolved_src.name)
-        active_paths = [resolved_src]
+        active_pairs: list[tuple[Path, Path | None]] = [(resolved_src, None)]
+        primary_parent: Path | None = None
     elif raw_name:
         if raw_name.strip() == "skill-curator":
             raise CuratorError("Refusing to adopt 'skill-curator' itself.")
         skill_name = validate_skill_name(raw_name)
-        active_paths = _find_active_skill_paths(
+        found_pairs = _find_active_skill_entries(
             skill_name=skill_name,
             tier=tier,
             cfg=cfg,
@@ -600,11 +1035,15 @@ def adopt_skill(
             scan_dirs=scan_dirs,
             project_dir=project_dir,
         )
-        if not active_paths:
+        if not found_pairs:
             raise CuratorError(f"Skill '{skill_name}' was not found in active {tier} directories.")
-        resolved_src = next((p for p in active_paths if (p / "SKILL.md").is_file()), active_paths[0])
+        resolved_src, primary_parent = next(
+            ((p, par) for p, par in found_pairs if (p / "SKILL.md").is_file()),
+            found_pairs[0],
+        )
         validate_tree_containment(resolved_src)
         fm = parse_frontmatter(resolved_src / "SKILL.md")
+        active_pairs = [(p, par) for p, par in found_pairs]
     else:
         raise CuratorError("Specify a skill <name> or --source-dir for adopt.")
 
@@ -612,6 +1051,16 @@ def adopt_skill(
     sug_kw, sug_tags = suggest_keywords_and_tags(skill_name, description)
     final_keywords = keywords if keywords else sug_kw
     final_tags = scene_tags if scene_tags else sug_tags
+    lock_sources = read_skills_lock_sources(home_dir=home_dir, project_dir=project_dir)
+    resolved_source_url = _resolve_source_url_for_action(
+        explicit_url=source_url,
+        skill_name=skill_name,
+        skill_md_path=resolved_src / "SKILL.md",
+        lock_sources=lock_sources,
+        skill_dir=resolved_src,
+        harness_parent=primary_parent,
+        home_dir=home_dir,
+    )
 
     vault_dir = Path(cfg["vault_path"])
     vault_skill_dir, vault_meta = _store_to_vault_preserving_source(
@@ -621,13 +1070,17 @@ def adopt_skill(
         description=description,
         keywords=final_keywords,
         scene_tags=final_tags,
-        source_url=source_url,
+        source_url=resolved_source_url,
         override_description=override_description,
     )
 
     mounted_at = utc_now_iso()
     stamped_paths: list[str] = []
-    for active in active_paths:
+    skipped_symlink_stamps: list[str] = []
+    for active, parent in active_pairs:
+        if has_symlink_component(active, parent):
+            skipped_symlink_stamps.append(str(active))
+            continue
         existing_active_meta = _read_json_dict(active / ".curator-meta.json")
         active_meta = {
             **vault_meta,
@@ -648,6 +1101,7 @@ def adopt_skill(
         "tier": tier,
         "vault_skill_dir": str(vault_skill_dir),
         "stamped_paths": stamped_paths,
+        "skipped_symlink_stamps": skipped_symlink_stamps,
         "keywords": vault_meta["keywords"],
         "scene_tags": vault_meta["scene_tags"],
     }
@@ -729,6 +1183,7 @@ def remediate_plan(
         )
         if d["tier"] == "global"
     ]
+    lock_sources = read_skills_lock_sources(home_dir=home_dir, project_dir=project_dir)
 
     # Pre-validate all items before performing any destructive operations.
     planned_adopts: list[dict[str, Any]] = []
@@ -737,9 +1192,10 @@ def remediate_plan(
         if name == "skill-curator":
             raise CuratorError("Refusing to remediate 'skill-curator' itself.")
         tier = str(item.get("tier") or "global")
-        primary = Path(os.path.expanduser(str(item["primary_path"]))).resolve() if item.get("primary_path") else None
+        primary = Path(os.path.expanduser(str(item["primary_path"]))) if item.get("primary_path") else None
+        primary_parent: Path | None = None
         if primary is None:
-            found = _find_active_skill_paths(
+            found_pairs = _find_active_skill_entries(
                 skill_name=validate_skill_name(name),
                 tier=tier,
                 cfg=cfg,
@@ -747,34 +1203,49 @@ def remediate_plan(
                 scan_dirs=scan_dirs,
                 project_dir=project_dir,
             )
-            if not found:
+            if not found_pairs:
                 raise CuratorError(f"Adopt target '{name}' was not found in {tier} directories.")
-            src_for_meta = next((p for p in found if (p / "SKILL.md").is_file()), found[0])
+            src_for_meta, primary_parent = next(
+                ((p, par) for p, par in found_pairs if (p / "SKILL.md").is_file()),
+                found_pairs[0],
+            )
         else:
             src_for_meta = primary
             name = name or src_for_meta.name
+        skill_slug = validate_skill_name(name)
         fm = parse_frontmatter(src_for_meta / "SKILL.md")
-        sug_kw, sug_tags = suggest_keywords_and_tags(validate_skill_name(name), fm.get("description", ""))
+        sug_kw, sug_tags = suggest_keywords_and_tags(skill_slug, fm.get("description", ""))
+        resolved_url = _resolve_source_url_for_action(
+            explicit_url=str(item.get("source_url") or ""),
+            skill_name=skill_slug,
+            skill_md_path=src_for_meta / "SKILL.md",
+            lock_sources=lock_sources,
+            skill_dir=src_for_meta,
+            harness_parent=primary_parent,
+            home_dir=home_dir,
+        )
         planned_adopts.append(
             {
-                "name": validate_skill_name(name),
+                "name": skill_slug,
                 "tier": tier,
                 "source_dir": primary,
                 "keywords": item.get("keywords") or sug_kw,
                 "scene_tags": item.get("scene_tags") or sug_tags,
+                "source_url": resolved_url,
                 "override_description": item.get("override_description"),
                 "path": str(src_for_meta),
             }
         )
 
     planned_demotes: list[dict[str, Any]] = []
+    demote_pairs_by_skill: list[tuple[str, list[tuple[Path, Path]]]] = []
     for item in demote_items:
         name = str(item.get("name") or "").strip()
         if name == "skill-curator":
             raise CuratorError("Refusing to demote 'skill-curator' itself.")
         skill_name = validate_skill_name(name)
         tier = str(item.get("tier") or "global")
-        found = _find_active_skill_paths(
+        found_pairs = _find_active_skill_entries(
             skill_name=skill_name,
             tier=tier,
             cfg=cfg,
@@ -782,23 +1253,58 @@ def remediate_plan(
             scan_dirs=scan_dirs,
             project_dir=project_dir,
         )
-        if not found:
+        if not found_pairs:
             raise CuratorError(f"Demote target '{skill_name}' was not found in {tier} directories.")
+        found = [p for p, _ in found_pairs]
         entry_force = bool(force or item.get("force"))
         ensure_no_diverged_duplicates(found, skill_name, entry_force)
-        primary = next((p for p in found if (p / "SKILL.md").is_file()), found[0])
+        primary, demote_parent = next(
+            ((p, par) for p, par in found_pairs if (p / "SKILL.md").is_file()),
+            found_pairs[0],
+        )
         fm = parse_frontmatter(primary / "SKILL.md")
         sug_kw, sug_tags = suggest_keywords_and_tags(skill_name, fm.get("description", ""))
+        resolved_url = _resolve_source_url_for_action(
+            explicit_url=str(item.get("source_url") or ""),
+            skill_name=skill_name,
+            skill_md_path=primary / "SKILL.md",
+            lock_sources=lock_sources,
+            skill_dir=primary,
+            harness_parent=demote_parent,
+            home_dir=home_dir,
+        )
+        demote_pairs_by_skill.append((skill_name, found_pairs))
         planned_demotes.append(
             {
                 "name": skill_name,
                 "tier": tier,
                 "keywords": item.get("keywords") or sug_kw,
                 "scene_tags": item.get("scene_tags") or sug_tags,
+                "source_url": resolved_url,
                 "paths": [str(p) for p in found],
                 "force": entry_force,
             }
         )
+
+    batch_demote_names = {entry["name"] for entry in planned_demotes}
+    for skill_name, found_pairs in demote_pairs_by_skill:
+        for p, par in found_pairs:
+            container = find_enclosing_symlink_container(p, par)
+            if container is not None:
+                siblings, _ = discover_skills_in_dir(container, max_depth=3)
+                remaining = sorted({s["name"] for s in siblings if s["name"] not in batch_demote_names})
+                if remaining:
+                    raise CuratorError(
+                        f"Skill '{skill_name}' resides inside whole-repo symlink '{container}' "
+                        f"alongside active siblings {remaining}. Demote the full suite together or "
+                        "replace the repo symlink with per-skill mounts.",
+                        payload={
+                            "error_code": "SYMLINKED_REPO_CONTAINER",
+                            "name": skill_name,
+                            "container": str(container),
+                            "remaining_skills": remaining,
+                        },
+                    )
 
     if dry_run:
         return {
@@ -820,11 +1326,14 @@ def remediate_plan(
             scan_dirs=scan_dirs,
             keywords=entry["keywords"],
             scene_tags=entry["scene_tags"],
+            source_url=entry["source_url"],
             override_description=entry["override_description"],
         )
         for entry in planned_adopts
     ]
 
+    batch_demote_names = {entry["name"] for entry in planned_demotes}
+    deferred_containers: set[Path] = set()
     demoted_results = [
         demote_skill(
             cfg=cfg,
@@ -833,13 +1342,18 @@ def remediate_plan(
             project_dir=project_dir,
             keywords=entry["keywords"],
             scene_tags=entry["scene_tags"],
+            source_url=entry["source_url"],
             extra_global_dirs=discovered_global,
             home_dir=home_dir,
             discover_global_dirs=True,
             force=bool(entry["force"]),
+            batch_demote_names=batch_demote_names,
+            deferred_symlink_containers=deferred_containers,
         )
         for entry in planned_demotes
     ]
+    for container in sorted(deferred_containers):
+        rmtree_safe(container)
 
     return {
         "ok": True,

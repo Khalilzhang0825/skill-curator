@@ -10,6 +10,8 @@ from typing import Any
 
 from common import (
     SKILL_NAME_RE,
+    discover_skills_in_dir,
+    is_plugin_bundle_dir,
     normalize_slug,
     parse_frontmatter,
     read_index_rows,
@@ -71,30 +73,14 @@ CAP_RESOLUTION_OPTIONS = [
 ]
 
 
-def is_plugin_bundle_dir(entry: Path) -> bool:
-    """Return True if entry looks like an external plugin bundle rather than a standalone skill."""
-    return (
-        (entry / "plugin.json").exists()
-        or (entry / ".claude-plugin" / "plugin.json").exists()
-        or (entry / "gemini-extension.json").exists()
-    )
-
-
 def scan_global_core(global_core_dirs: list[str], global_cap: int) -> dict[str, Any]:
     """Count deduplicated standalone skills across managed Global Core directories."""
     paths_by_name: dict[str, Path] = {}
     for raw_dir in global_core_dirs:
         gdir = Path(os.path.expanduser(raw_dir)).resolve()
-        if not gdir.is_dir():
-            continue
-        for entry in sorted(gdir.iterdir(), key=lambda p: p.name):
-            if not entry.is_dir():
-                continue
-            if entry.name == "skill-curator" or is_plugin_bundle_dir(entry):
-                continue
-            if not (entry / "SKILL.md").is_file():
-                continue
-            paths_by_name.setdefault(entry.name, entry)
+        entries, _ = discover_skills_in_dir(gdir)
+        for ent in entries:
+            paths_by_name.setdefault(ent["name"], ent["path"])
 
     skills = sorted(paths_by_name.keys())
     count = len(skills)
@@ -122,14 +108,15 @@ def _is_script_file(path: Path) -> bool:
 
 
 def detect_scripts(root_dir: Path) -> list[str]:
-    """Return sorted relative POSIX paths of script files inside root_dir."""
+    """Return sorted relative POSIX paths of script files inside root_dir excluding .git."""
     detected: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(str(root_dir), followlinks=False):
-        dirnames.sort()
+    resolved_root = Path(os.path.realpath(str(root_dir)))
+    for dirpath, dirnames, filenames in os.walk(str(resolved_root), followlinks=False):
+        dirnames[:] = sorted(d for d in dirnames if d != ".git")
         for fname in sorted(filenames):
             fpath = Path(dirpath) / fname
             if _is_script_file(fpath):
-                detected.append(fpath.relative_to(root_dir).as_posix())
+                detected.append(fpath.relative_to(resolved_root).as_posix())
     detected.sort()
     return detected
 
@@ -247,21 +234,16 @@ def _read_skill_summary(skill_dir: Path) -> tuple[str, list[str]]:
 
 def _collect_dir_skills(base_dir: Path, tier: str, seen: dict[str, dict[str, Any]]) -> None:
     """Collect standalone skills from a skill container directory."""
-    if not base_dir.is_dir():
-        return
-    for entry in sorted(base_dir.iterdir(), key=lambda p: p.name):
-        if not entry.is_dir():
+    entries, _ = discover_skills_in_dir(base_dir)
+    for ent in entries:
+        sname = ent["name"]
+        if sname in seen:
             continue
-        if entry.name == "skill-curator" or is_plugin_bundle_dir(entry):
-            continue
-        if not (entry / "SKILL.md").is_file():
-            continue
-        if entry.name in seen:
-            continue
+        entry = ent["path"]
         desc, kws = _read_skill_summary(entry)
-        seen[entry.name] = {
+        seen[sname] = {
             "tier": tier,
-            "name": entry.name,
+            "name": sname,
             "path": str(entry),
             "description": desc,
             "keywords": kws,

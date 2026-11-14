@@ -21,8 +21,15 @@ from common import (
     STANDARD_HARNESS_SPECS,
     CuratorError,
     copy_tree_clean,
+    discover_skills_in_dir,
+    extract_frontmatter_repo_source,
+    find_enclosing_symlink_container,
+    inspect_ancestor_repo_provenance,
+    is_plugin_bundle_dir,
+    normalize_repo_source,
     parse_frontmatter,
     read_index_rows,
+    read_skills_lock_sources,
     resolve_home_dir,
     rmtree_safe,
     tree_content_digest,
@@ -349,12 +356,12 @@ def mount_by_tag(
 def ensure_no_diverged_duplicates(
     existing: list[Path], skill_name: str, force: bool
 ) -> None:
-    """Reject removing multiple copies if any are missing/non-dirs or differ in content."""
+    """Reject removing multiple copies if any are broken/non-dirs or differ in content."""
     if len(existing) <= 1 or force:
         return
-    non_symlink_dirs = [p for p in existing if p.is_dir() and not p.is_symlink()]
-    if len(non_symlink_dirs) != len(existing) or len(
-        {tree_content_digest(p) for p in non_symlink_dirs}
+    valid_dirs = [p for p in existing if p.is_dir()]
+    if len(valid_dirs) != len(existing) or len(
+        {tree_content_digest(Path(os.path.realpath(str(p)))) for p in valid_dirs}
     ) > 1:
         raise CuratorError(
             f"Diverged duplicates detected for '{skill_name}' across {[str(p) for p in existing]}. "
@@ -367,6 +374,27 @@ def ensure_no_diverged_duplicates(
         )
 
 
+def _prune_empty_ancestors(start_dir: Path, stop_at: Path) -> None:
+    """Remove empty intermediate non-.git directories strictly below stop_at."""
+    stop_norm = os.path.normcase(os.path.normpath(os.path.abspath(str(stop_at))))
+    cur = start_dir
+    while True:
+        cur_norm = os.path.normcase(os.path.normpath(os.path.abspath(str(cur))))
+        if cur_norm == stop_norm:
+            break
+        if cur.name == ".git" or cur.is_symlink() or not cur.is_dir():
+            break
+        try:
+            if any(cur.iterdir()):
+                break
+            cur.rmdir()
+        except OSError:
+            break
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+
+
 def demote_skill(
     cfg: dict[str, Any],
     raw_name: str,
@@ -375,10 +403,13 @@ def demote_skill(
     *,
     keywords: list[str] | None = None,
     scene_tags: list[str] | None = None,
+    source_url: str = "",
     extra_global_dirs: list[str] | None = None,
     home_dir: Path | None = None,
     discover_global_dirs: bool = False,
     force: bool = False,
+    batch_demote_names: set[str] | None = None,
+    deferred_symlink_containers: set[Path] | None = None,
 ) -> dict[str, Any]:
     """Archive/update an active skill in Skill Vault and remove its active mount(s)."""
     cleaned_raw = raw_name.strip()
@@ -412,8 +443,30 @@ def demote_skill(
                 dedup_parents.append(p)
         parent_dirs = dedup_parents
 
-    candidates = [p / skill_name for p in parent_dirs]
-    existing = [p for p in candidates if p.exists() or p.is_symlink()]
+    existing_pairs: list[tuple[Path, Path]] = []
+    seen_existing: set[str] = set()
+    for parent in parent_dirs:
+        direct = parent / skill_name
+        if direct.exists() or os.path.islink(str(direct)):
+            if is_plugin_bundle_dir(direct):
+                raise CuratorError(
+                    f"Refusing to demote external plugin bundle '{direct.name}'."
+                )
+            dkey = os.path.normcase(os.path.normpath(os.path.abspath(str(direct))))
+            if dkey not in seen_existing:
+                seen_existing.add(dkey)
+                existing_pairs.append((direct, parent))
+        entries, _ = discover_skills_in_dir(parent)
+        for ent in entries:
+            if ent["name"] != skill_name:
+                continue
+            epath = ent["path"]
+            ekey = os.path.normcase(os.path.normpath(os.path.abspath(str(epath))))
+            if ekey not in seen_existing:
+                seen_existing.add(ekey)
+                existing_pairs.append((epath, parent))
+
+    existing = [p for p, _ in existing_pairs]
     if not existing:
         raise CuratorError(
             f"Skill '{skill_name}' is not mounted in {source_tier}."
@@ -425,13 +478,33 @@ def demote_skill(
                 f"Refusing to demote external plugin bundle '{path.name}'."
             )
 
+    batch_set = (batch_demote_names or set()) | {skill_name}
+    for path, parent in existing_pairs:
+        container = find_enclosing_symlink_container(path, parent)
+        if container is not None:
+            siblings, _ = discover_skills_in_dir(container, max_depth=3)
+            remaining = sorted({s["name"] for s in siblings if s["name"] not in batch_set})
+            if remaining:
+                raise CuratorError(
+                    f"Skill '{skill_name}' resides inside whole-repo symlink '{container}' "
+                    f"alongside active siblings {remaining}. Demote the full suite together or "
+                    "replace the repo symlink with per-skill mounts.",
+                    payload={
+                        "error_code": "SYMLINKED_REPO_CONTAINER",
+                        "name": skill_name,
+                        "container": str(container),
+                        "remaining_skills": remaining,
+                    },
+                )
+
     ensure_no_diverged_duplicates(existing, skill_name, force)
 
-    primary = next((p for p in existing if (p / "SKILL.md").is_file()), None)
-    if primary is None:
+    primary_pair = next(((p, par) for p, par in existing_pairs if (p / "SKILL.md").is_file()), None)
+    if primary_pair is None:
         raise CuratorError(
             f"Mounted directory for '{skill_name}' is missing SKILL.md."
         )
+    primary, primary_parent = primary_pair
 
     validate_tree_containment(primary)
     fm = parse_frontmatter(primary / "SKILL.md")
@@ -465,12 +538,42 @@ def demote_skill(
         if isinstance(mount_meta.get("scene_tags"), list)
         else [],
     )
-    source_url = str(
-        existing_vault_meta.get("source_url")
+    lock_project_dir = (
+        project_dir
+        if project_dir is not None
+        else (resolved_proj if source_tier == "project" else None)
+    )
+    lock_entry = read_skills_lock_sources(home_dir=home_dir, project_dir=lock_project_dir).get(
+        skill_name
+    )
+    lock_url = lock_entry[1] if lock_entry else ""
+    anc_signals = inspect_ancestor_repo_provenance(
+        primary,
+        skill_name=skill_name,
+        harness_parent=primary_parent,
+        home_dir=home_dir,
+    )
+    anc_lock_url = anc_signals.get("skills-lock", (None, ""))[1]
+    git_origin_url = anc_signals.get("git-origin", (None, ""))[1]
+    pkg_url = anc_signals.get("package-json", (None, ""))[1]
+    fm_url = extract_frontmatter_repo_source(primary / "SKILL.md")
+    raw_source_url = str(
+        source_url
+        or existing_vault_meta.get("source_url")
         or index_row.get("source_url")
         or mount_meta.get("source_url")
+        or lock_url
+        or anc_lock_url
+        or git_origin_url
+        or fm_url
+        or pkg_url
         or ""
-    )
+    ).strip()
+    if raw_source_url:
+        _, canonical_url = normalize_repo_source(raw_source_url)
+        source_url = canonical_url or raw_source_url
+    else:
+        source_url = ""
     description = str(
         fm.get("description")
         or mount_meta.get("description")
@@ -505,9 +608,20 @@ def demote_skill(
     )
 
     removed_paths: list[str] = []
-    for path in existing:
+    for path, parent in existing_pairs:
+        container = find_enclosing_symlink_container(path, parent)
+        if container is not None:
+            if deferred_symlink_containers is not None:
+                deferred_symlink_containers.add(container)
+                removed_paths.append(str(container))
+            else:
+                rmtree_safe(container)
+                removed_paths.append(str(container))
+            continue
         rmtree_safe(path)
         removed_paths.append(str(path))
+        if path.parent != parent:
+            _prune_empty_ancestors(path.parent, parent)
 
     return {
         "ok": True,
@@ -544,16 +658,9 @@ def _collect_project_paths(project_dir: Path | None) -> dict[str, Path]:
         project_dir / ".agents" / "skills",
         project_dir / ".claude" / "skills",
     ):
-        if not container.is_dir():
-            continue
-        for entry in sorted(container.iterdir(), key=lambda p: p.name):
-            if not entry.is_dir():
-                continue
-            if entry.name == "skill-curator" or is_plugin_bundle_dir(entry):
-                continue
-            if not (entry / "SKILL.md").is_file():
-                continue
-            found.setdefault(entry.name, entry)
+        entries, _ = discover_skills_in_dir(container)
+        for ent in entries:
+            found.setdefault(ent["name"], ent["path"])
     return found
 
 

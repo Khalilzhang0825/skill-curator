@@ -187,84 +187,89 @@ class TestWindowsAndCrossOsCompat(unittest.TestCase):
         self.assertIn("injectSteps", json.loads(gbk_proc.stdout.decode("utf-8")))
 
         # CLI store/search + git fetch with Chinese commit/description under LC_ALL=C
+        from common import rmtree_safe
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            vault = root / "vault"
-            work = root / "work-中文"
-            bare = root / "repo-中文.git"
-            work.mkdir()
-            git_env = {
-                **env,
-                "GIT_AUTHOR_NAME": "测试用户",
-                "GIT_AUTHOR_EMAIL": "test@example.com",
-                "GIT_COMMITTER_NAME": "测试用户",
-                "GIT_COMMITTER_EMAIL": "test@example.com",
-            }
-            for cmd in (
-                ["git", "init", "-b", "main"],
-            ):
-                subprocess.run(cmd, cwd=str(work), check=True, capture_output=True, env=git_env)
-            (work / "SKILL.md").write_text(
-                "---\nname: cjk-helper\ndescription: 中文文档排版助手与架构图生成器。\n---\n\n# CJK Helper\n",
-                encoding="utf-8",
-            )
-            subprocess.run(["git", "add", "-A"], cwd=str(work), check=True, capture_output=True, env=git_env)
-            subprocess.run(
-                ["git", "commit", "-m", "初始化中文技能"],
-                cwd=str(work),
-                check=True,
-                capture_output=True,
-                env=git_env,
-            )
-            subprocess.run(
-                ["git", "clone", "--bare", str(work), str(bare)],
-                check=True,
-                capture_output=True,
-                env=git_env,
-            )
+            try:
+                vault = root / "vault"
+                work = root / "work-中文"
+                bare = root / "repo-中文.git"
+                work.mkdir()
+                git_env = {
+                    **env,
+                    "GIT_AUTHOR_NAME": "测试用户",
+                    "GIT_AUTHOR_EMAIL": "test@example.com",
+                    "GIT_COMMITTER_NAME": "测试用户",
+                    "GIT_COMMITTER_EMAIL": "test@example.com",
+                }
+                for cmd in (
+                    ["git", "init", "-b", "main"],
+                ):
+                    subprocess.run(cmd, cwd=str(work), check=True, capture_output=True, env=git_env)
+                (work / "SKILL.md").write_text(
+                    "---\nname: cjk-helper\ndescription: 中文文档排版助手与架构图生成器。\n---\n\n# CJK Helper\n",
+                    encoding="utf-8",
+                )
+                subprocess.run(["git", "add", "-A"], cwd=str(work), check=True, capture_output=True, env=git_env)
+                subprocess.run(
+                    ["git", "commit", "-m", "初始化中文技能"],
+                    cwd=str(work),
+                    check=True,
+                    capture_output=True,
+                    env=git_env,
+                )
+                subprocess.run(
+                    ["git", "clone", "--bare", str(work), str(bare)],
+                    check=True,
+                    capture_output=True,
+                    env=git_env,
+                )
 
-            dest = root / "staged"
-            fetch_proc = subprocess.run(
-                [sys.executable, str(CURATOR_PY), "fetch", bare.as_uri(), "--dest-dir", str(dest)],
-                capture_output=True,
-                env=env,
-                timeout=15,
-            )
-            self.assertEqual(fetch_proc.returncode, 0, msg=fetch_proc.stderr.decode("utf-8", "replace"))
-            fetch_out = json.loads(fetch_proc.stdout.decode("utf-8"))
-            self.assertEqual(fetch_out["skill"]["name"], "cjk-helper")
+                dest = root / "staged"
+                fetch_proc = subprocess.run(
+                    [sys.executable, str(CURATOR_PY), "fetch", bare.as_uri(), "--dest-dir", str(dest)],
+                    capture_output=True,
+                    env=env,
+                    timeout=15,
+                )
+                self.assertEqual(fetch_proc.returncode, 0, msg=fetch_proc.stderr.decode("utf-8", "replace"))
+                fetch_out = json.loads(fetch_proc.stdout.decode("utf-8"))
+                self.assertEqual(fetch_out["skill"]["name"], "cjk-helper")
 
-            subprocess.run(
-                [sys.executable, str(CURATOR_PY), "init", "--vault", str(vault)],
-                check=True,
-                capture_output=True,
-                env=env,
-            )
-            store_proc = subprocess.run(
-                [
-                    sys.executable,
-                    str(CURATOR_PY),
-                    "store",
-                    "--source-dir",
-                    str(dest / "cjk-helper"),
-                    "--tags",
-                    "中文排版",
-                    "--config",
-                    str(vault / "config.json"),
-                ],
-                capture_output=True,
-                env=env,
-                timeout=15,
-            )
-            self.assertEqual(store_proc.returncode, 0, msg=store_proc.stderr.decode("utf-8", "replace"))
-            search_proc = subprocess.run(
-                [sys.executable, str(CURATOR_PY), "search", "中文排版", "--config", str(vault / "config.json")],
-                capture_output=True,
-                env=env,
-                timeout=15,
-            )
-            self.assertEqual(search_proc.returncode, 0, msg=search_proc.stderr.decode("utf-8", "replace"))
-            self.assertIn("中文排版", search_proc.stdout.decode("utf-8"))
+                subprocess.run(
+                    [sys.executable, str(CURATOR_PY), "init", "--vault", str(vault)],
+                    check=True,
+                    capture_output=True,
+                    env=env,
+                )
+                store_proc = subprocess.run(
+                    [
+                        sys.executable,
+                        str(CURATOR_PY),
+                        "store",
+                        "--source-dir",
+                        str(dest / "cjk-helper"),
+                        "--tags",
+                        "中文排版",
+                        "--config",
+                        str(vault / "config.json"),
+                    ],
+                    capture_output=True,
+                    env=env,
+                    timeout=15,
+                )
+                self.assertEqual(store_proc.returncode, 0, msg=store_proc.stderr.decode("utf-8", "replace"))
+                search_proc = subprocess.run(
+                    [sys.executable, str(CURATOR_PY), "search", "中文排版", "--config", str(vault / "config.json")],
+                    capture_output=True,
+                    env=env,
+                    timeout=15,
+                )
+                self.assertEqual(search_proc.returncode, 0, msg=search_proc.stderr.decode("utf-8", "replace"))
+                self.assertIn("中文排版", search_proc.stdout.decode("utf-8"))
+            finally:
+                rmtree_safe(root, ignore_errors=True)
 
     def test_git_env_cross_platform_and_tool_not_found(self) -> None:
         import fetcher

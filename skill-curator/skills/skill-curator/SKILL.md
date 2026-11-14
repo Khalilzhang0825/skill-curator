@@ -26,7 +26,7 @@ If commands fail with `CONFIG_NOT_FOUND` (or `~/.config/skill-curator/config.jso
    ```bash
    "<skill_dir>/scripts/curator.cmd" scan --project-dir "<cwd>"
    ```
-   - If existing unmanaged skills, cap violations, bloat, or cross-harness duplicates are found, present the concise `keep_and_adopt` (`<= 8` Global Core) + `demote_to_vault` (with suggested **Scene Tags** & keywords) + `review_warnings` plan for **one confirmation**, then execute via Workflow F (`remediate`).
+   - If existing unmanaged skills, cap violations, bloat, or cross-harness duplicates are found, present the concise `keep_and_adopt` (preserving cohesive same-repo companion suites in `repo_groups` atomically, flagging `soft_cap_exceeded` + `recommended_global_cap` when an intact suite exceeds `global_cap`) + `demote_to_vault` (with suggested **Scene Tags**, shared suite tag, & keywords) + `review_warnings` plan for **one confirmation**, then execute via Workflow F (`remediate`).
 4. See [references/config-schema.md](references/config-schema.md) and [references/vault-index-template.md](references/vault-index-template.md) for schemas.
 
 ## Workflow B: URL or Local Skill Ingestion (`fetch` -> `inspect` -> `store` -> `mount`)
@@ -93,8 +93,8 @@ Run when asked for a mount health audit (never silently delete or demote skills)
 ## Workflow F: Local Skill Discovery, Diagnosis & Remediation (`scan` -> confirm -> `remediate` / `adopt`)
 
 Use whenever the user asks to scan, diagnose, deduplicate, organize, or adopt existing local skills across harnesses (works even before `init`):
-1. Run `scan --project-dir "<cwd>"` (alias `diagnose`) to inventory skills across Agents, Claude Code, Antigravity, Codex, Cursor, and OpenCode while excluding `skill-curator` and plugin bundles.
-2. Summarize `cap_violations`, `cross_harness_duplicates` (`content_identical`), `bloat_and_quality`, `scripts_present`, plus the recommended `keep_and_adopt` (`<= 8`) and `demote_to_vault` plan with suggested keywords & **Scene Tags**.
+1. Run `scan --project-dir "<cwd>"` (alias `diagnose`) to inventory top-level, nested `git clone`, and symlinked local skills across Agents, Claude Code, Antigravity, Codex, Cursor, and OpenCode while excluding `skill-curator` and plugin bundles.
+2. Summarize `cap_violations`, `cross_harness_duplicates` (`content_identical`), `bloat_and_quality`, `scripts_present`, `repo_groups` (cohesive companion suites sharing a `.git/config` origin, lockfile, `package.json`, container dir, or cross-reference stay grouped atomically with a shared `suite_scene_tag`), plus `keep_and_adopt` (noting `soft_cap_exceeded` and `recommended_global_cap` if an intact suite exceeds the default cap) and `demote_to_vault` with suggested keywords, **Scene Tags**, and resolved `source_url`.
 3. Preview changes safely (`--dry-run`) or execute in one command after **explicit user confirmation**:
    ```bash
    "<skill_dir>/scripts/curator.cmd" remediate --dry-run --adopt <core-skill> --demote <extra-skill>

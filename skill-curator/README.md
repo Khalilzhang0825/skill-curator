@@ -2,13 +2,13 @@
 
 <img src="./assets/logo.png" alt="Skill Curator logo" width="88" />
 
-# Skill Curator (Plugin Bundle · `v0.1.1`)
+# Skill Curator (Plugin Bundle · `v0.1.2`)
 
 [Project README (English)](https://github.com/Khalilzhang0825/skill-curator/blob/main/README.md) | [中文完整文档](https://github.com/Khalilzhang0825/skill-curator/blob/main/README.zh-CN.md)
 
 </div>
 
-Cross-agent skill curation across three physical tiers: a capped **Global Core**, copy-mounted **Project Workspaces**, and an out-of-band **Skill Vault** indexed by `INDEX.md` with **Scene Tags** — with native Windows, macOS, and Linux support plus one-command multi-harness discovery & cleanup (`scan` / `adopt` / `remediate`).
+Cross-agent skill curation across three physical tiers: a capped **Global Core**, copy-mounted **Project Workspaces**, and an out-of-band **Skill Vault** indexed by `INDEX.md` with **Scene Tags** — with native Windows, macOS, and Linux support plus one-command multi-harness discovery & cleanup (`scan` / `adopt` / `remediate`, preserving cohesive same-repo companion suites from `npx skills`, direct `git clone`, or symlinked local clones).
 
 ## Requirements
 

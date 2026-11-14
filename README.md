@@ -141,7 +141,7 @@ npx skills add Khalilzhang0825/skill-curator --skill skill-curator --copy
 
 ### Option 2: Antigravity (Full Plugin with PreInvocation Hook + Rules + Logo)
 
-Install from a GitHub Release archive (`skill-curator-v0.1.1.tar.gz` / `.zip`) or build from source:
+Install from a GitHub Release archive (`skill-curator-v0.1.2.tar.gz` / `.zip`) or build from source:
 
 ```bash
 # 1. Clone the repository and build the clean runtime archive (or download from GitHub Releases)
@@ -151,7 +151,7 @@ python3 ./scripts/package.py
 
 # 2. Extract into Antigravity's global plugins folder (macOS / Linux)
 mkdir -p ~/.gemini/config/plugins
-tar -xzf ./dist/skill-curator-v0.1.1.tar.gz -C ~/.gemini/config/plugins
+tar -xzf ./dist/skill-curator-v0.1.2.tar.gz -C ~/.gemini/config/plugins
 
 # 3. Initialize your Skill Vault, discover existing harness dirs, and scan local skills
 ~/.gemini/config/plugins/skill-curator/skills/skill-curator/scripts/curator.cmd init \
@@ -167,7 +167,7 @@ tar -xzf ./dist/skill-curator-v0.1.1.tar.gz -C ~/.gemini/config/plugins
 ```powershell
 py -3 .\scripts\package.py
 New-Item -ItemType Directory -Force -Path "$HOME\.gemini\config\plugins" | Out-Null
-Expand-Archive -Path ".\dist\skill-curator-v0.1.1.zip" -DestinationPath "$HOME\.gemini\config\plugins" -Force
+Expand-Archive -Path ".\dist\skill-curator-v0.1.2.zip" -DestinationPath "$HOME\.gemini\config\plugins" -Force
 
 & "$HOME\.gemini\config\plugins\skill-curator\skills\skill-curator\scripts\curator.cmd" init `
   --vault "$HOME\.agents\skill-vault" `
@@ -239,7 +239,7 @@ Every command supports `--config <path>` or `SKILL_CURATOR_CONFIG` (default fall
 | Command | Purpose | Example |
 | --- | --- | --- |
 | `init` | Initialize Vault, `INDEX.md`, and `config.json` (`--discover-global-dirs` auto-detects harnesses) | `curator.cmd init --vault ~/.agents/skill-vault --discover-global-dirs` |
-| `scan` (`diagnose`) | Discover local skills across 8 harness dirs (works before `init`), diagnose cap/dups/bloat | `curator.cmd scan --project-dir .` |
+| `scan` (`diagnose`) | Discover top-level, nested `git clone`, and symlinked skills across 8 harness dirs (works before `init`), group cohesive suites via lockfiles/`.git/config`/`repo_groups`, diagnose cap/dups/bloat | `curator.cmd scan --project-dir .` |
 | `adopt` | Back up kept local skills to Vault + stamp provenance without removing active copies | `curator.cmd adopt my-core --keywords "lint" --tags "core"` |
 | `remediate` | Execute confirmed `--adopt`/`--demote` flags or JSON `--plan` (`--dry-run` preview supported) | `curator.cmd remediate --adopt core-a --demote heavy-pdf` |
 | `fetch` | Clone/download a skill URL or return multi-skill inventory (`--all` stages all in 1 clone) | `curator.cmd fetch "https://github.com/owner/repo" --all --timeout 30` |
@@ -320,7 +320,7 @@ Default config (`~/.config/skill-curator/config.json`):
     │   ├── SKILL.md                   # Curator workflow instructions
     │   ├── references/                # config-schema.md & vault-index-template.md
     │   └── scripts/                   # curator.cmd, curator.py, onboarding.py, fetcher.py, auditor.py, lifecycle.py, common.py, hook_intercept.py
-    └── tests/                         # 49 subprocess black-box tests (unittest, stdlib only)
+    └── tests/                         # 59 subprocess black-box tests (unittest, stdlib only)
 ```
 
 ### Run the Test Suite
@@ -344,7 +344,7 @@ python3 -m unittest discover -s "./skill-curator/tests" -v
    ```powershell
    py -3 .\scripts\package.py
    New-Item -ItemType Directory -Force -Path "$HOME\.gemini\config\plugins" | Out-Null
-   Expand-Archive -Path ".\dist\skill-curator-v0.1.1.zip" -DestinationPath "$HOME\.gemini\config\plugins" -Force
+   Expand-Archive -Path ".\dist\skill-curator-v0.1.2.zip" -DestinationPath "$HOME\.gemini\config\plugins" -Force
    ```
 4. **Verify Polyglot Hook (`cmd.exe` `chcp 936` + PowerShell UTF-8)**:
    ```cmd
@@ -372,9 +372,19 @@ python3 ./scripts/package.py
 ```
 
 Generates clean runtime archives (excluding `__pycache__`, tests, and local scratch state) inside `./dist/`:
-- `skill-curator-v0.1.1.tar.gz`
-- `skill-curator-v0.1.1.zip`
+- `skill-curator-v0.1.2.tar.gz`
+- `skill-curator-v0.1.2.zip`
 - `SHA256SUMS.txt`
+
+---
+
+## Release History (What Changed & Why)
+
+| Version | Key Changes | What Workflow It Solves |
+| --- | --- | --- |
+| **`v0.1.2`** | **Same-repo atomic suites + direct `git clone` / symlink / archive discovery**: Added multi-signal repo attribution (lockfiles, `.git/config` & worktree `gitdir:`, frontmatter, `package.json`, container dirs, cross-references), atomic `repo_groups` preservation (`soft_cap_exceeded` + `recommended_global_cap` + `suite_scene_tag`), bounded-depth nested discovery (`max_depth=4`), `.git` exclusion in Vault/digests, and external symlink-safe `adopt`/`demote`. | Keeps companion skills from multi-skill repos together instead of splitting them between Global Core and Vault, and automatically discovers & tracks skills installed via plain `git clone`, symlinks to external repos, or `.zip` extracts without requiring `npx skills`. |
+| **`v0.1.1`** | **Native Windows compatibility + local onboarding (`scan` / `adopt` / `remediate`)**: Added polyglot `.cmd` / `sh` launchers (`hooks/run-hook.cmd`, `curator.cmd`), cross-platform non-interactive `git` flags, `rmtree_safe` for read-only `.git` packfiles, `CP936`/`GB18030` stdin decoding, and cross-harness local skill discovery/remediation. | Runs natively on Windows PowerShell / `cmd.exe` (including Chinese locales) without Store `python3.exe` traps, and lets existing users audit and organize dozens of pre-installed skills across Codex, Claude Code, Antigravity, Cursor, and OpenCode in one pass. |
+| **`v0.1.0`** | **Three-tier curation foundation**: Released Global Core / copy-only Project Workspace / zero-token Skill Vault (`INDEX.md` + Scene Tags), `fetch -> inspect -> store -> mount` / `search` / `demote` / `health` CLI, and `PreInvocation` / `UserPromptSubmit` URL interception hooks. | Stops chat context bloat and broken symlinks when collecting GitHub skills by vetting every skill before activation and archiving unused skills at zero idle token cost. |
 
 ---
 

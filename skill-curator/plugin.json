@@ -1,7 +1,7 @@
 {
   "name": "skill-curator",
   "displayName": "Skill Curator",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Cross-agent skill curation across Global Core, Project Workspace, and out-of-band Skill Vault.",
   "logo": "assets/logo.png",
   "suggestedPrompts": [

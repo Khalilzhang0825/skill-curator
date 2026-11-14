@@ -142,7 +142,7 @@ npx skills add Khalilzhang0825/skill-curator --skill skill-curator --copy
 
 ### 方式二：Antigravity 完整插件安装（含 `PreInvocation` Hook + 规则 + 图标）
 
-可以直接下载 GitHub Releases 里的打包文件（`skill-curator-v0.1.1.tar.gz` / `.zip`），或者从源码仓库构建后解压到 `~/.gemini/config/plugins/skill-curator`：
+可以直接下载 GitHub Releases 里的打包文件（`skill-curator-v0.1.2.tar.gz` / `.zip`），或者从源码仓库构建后解压到 `~/.gemini/config/plugins/skill-curator`：
 
 ```bash
 # 1. 克隆仓库并构建纯净安装包（或直接从 GitHub Releases 下载）
@@ -152,7 +152,7 @@ python3 ./scripts/package.py
 
 # 2. 解压到 Antigravity 全局插件目录（macOS / Linux）
 mkdir -p ~/.gemini/config/plugins
-tar -xzf ./dist/skill-curator-v0.1.1.tar.gz -C ~/.gemini/config/plugins
+tar -xzf ./dist/skill-curator-v0.1.2.tar.gz -C ~/.gemini/config/plugins
 
 # 3. 初始化冷库并自动发现已有各 Agent 技能目录，同时执行本地技能诊断扫描
 ~/.gemini/config/plugins/skill-curator/skills/skill-curator/scripts/curator.cmd init \
@@ -168,7 +168,7 @@ tar -xzf ./dist/skill-curator-v0.1.1.tar.gz -C ~/.gemini/config/plugins
 ```powershell
 py -3 .\scripts\package.py
 New-Item -ItemType Directory -Force -Path "$HOME\.gemini\config\plugins" | Out-Null
-Expand-Archive -Path ".\dist\skill-curator-v0.1.1.zip" -DestinationPath "$HOME\.gemini\config\plugins" -Force
+Expand-Archive -Path ".\dist\skill-curator-v0.1.2.zip" -DestinationPath "$HOME\.gemini\config\plugins" -Force
 
 & "$HOME\.gemini\config\plugins\skill-curator\skills\skill-curator\scripts\curator.cmd" init `
   --vault "$HOME\.agents\skill-vault" `
@@ -239,7 +239,7 @@ python3 ~/.agents/skills/skill-curator/scripts/curator.py init \
 | 子命令 | 用途 | 常用示例 |
 | --- | --- | --- |
 | `init` | 初始化 Skill Vault、`INDEX.md` 和 `config.json`（`--discover-global-dirs` 自动探测各目录） | `curator.cmd init --vault ~/.agents/skill-vault --discover-global-dirs` |
-| `scan`（`diagnose`） | 跨 8 个本地 Agent 目录扫描技能（`init` 前即可运行），诊断超额、重复与膨胀 | `curator.cmd scan --project-dir .` |
+| `scan`（`diagnose`） | 跨 8 个本地 Agent 目录发现顶层、直接 `git clone` 嵌套目录与软链技能（`init` 前即可运行），通过锁文件与 `.git/config` 识别同仓库套件（`repo_groups`）并诊断超额与膨胀 | `curator.cmd scan --project-dir .` |
 | `adopt` | 将保留的本地技能备份入库并写入出处元数据，不删除原目录或改动 `SKILL.md` | `curator.cmd adopt my-core --keywords "lint" --tags "core"` |
 | `remediate` | 经用户确认后一键执行 `--adopt`/`--demote` 或 `--plan`（支持 `--dry-run` 预演） | `curator.cmd remediate --adopt core-a --demote heavy-pdf` |
 | `fetch` | 拉取 GitHub URL / 本地仓库（`--all` 一次克隆批量暂存） | `curator.cmd fetch "https://github.com/owner/repo" --all --timeout 30` |
@@ -320,10 +320,10 @@ python3 ~/.agents/skills/skill-curator/scripts/curator.py init \
     │   ├── SKILL.md                   # Skill Curator 核心工作流说明
     │   ├── references/                # 配置结构与冷库索引模板
     │   └── scripts/                   # curator.cmd, curator.py, onboarding.py, fetcher.py, auditor.py, lifecycle.py, common.py, hook_intercept.py
-    └── tests/                         # 49 项黑盒回归测试（仅依赖标准库 unittest）
+    └── tests/                         # 59 项黑盒回归测试（仅依赖标准库 unittest）
 ```
 
-### 运行测试（全部 49 项子进程黑盒测试）
+### 运行测试（全部 59 项子进程黑盒测试）
 
 ```bash
 python3 -m unittest discover -s "./skill-curator/tests" -v
@@ -344,7 +344,7 @@ python3 -m unittest discover -s "./skill-curator/tests" -v
    ```powershell
    py -3 .\scripts\package.py
    New-Item -ItemType Directory -Force -Path "$HOME\.gemini\config\plugins" | Out-Null
-   Expand-Archive -Path ".\dist\skill-curator-v0.1.1.zip" -DestinationPath "$HOME\.gemini\config\plugins" -Force
+   Expand-Archive -Path ".\dist\skill-curator-v0.1.2.zip" -DestinationPath "$HOME\.gemini\config\plugins" -Force
    ```
 4. **验证 Hook 跨平台启动器（`cmd.exe` `chcp 936` + PowerShell UTF-8）**：
    ```cmd
@@ -372,9 +372,19 @@ python3 ./scripts/package.py
 ```
 
 会在 `./dist/` 下生成剥离了缓存、`tests/` 与本地临时状态的纯净插件安装包：
-- `skill-curator-v0.1.1.tar.gz`
-- `skill-curator-v0.1.1.zip`
+- `skill-curator-v0.1.2.tar.gz`
+- `skill-curator-v0.1.2.zip`
 - `SHA256SUMS.txt`
+
+---
+
+## 版本演进（改了什么 & 解决什么问题）
+
+| 版本 | 核心改动 | 方便了什么日常工作 |
+| --- | --- | --- |
+| **`v0.1.2`** | **同仓库整套不拆散 + 直接 `git clone` / 软链 / 压缩包识别**：补齐多路仓库归因（锁文件、`.git/config` 与 worktree/submodule `gitdir:`、frontmatter、`package.json`、容器目录与正文互引）、`repo_groups` 整组保留（含 `soft_cap_exceeded` / `recommended_global_cap` / 共享 `suite_scene_tag`）、有界嵌套目录发现（`max_depth=4`）、Vault/摘要自动排除 `.git`，以及外部克隆软链的 `adopt`/`demote` 安全隔离。 | 整理多 skill 仓库（如 Matt Pocock 或 Ponytail 套件）时不再被拆得一半在全局一半在冷库；哪怕不是用 `npx skills`，而是直接 `git clone` 整个项目、从外部仓库建软链接或解压 `.zip` 放进技能目录，也能自动扫出、追溯来源并保持原仓库干净。 |
+| **`v0.1.1`** | **Windows 原生兼容 + 已有本地技能体检整理**：新增多义 `.cmd` / `sh` 启动器（`hooks/run-hook.cmd`、`curator.cmd`）、跨平台 `git` 防弹窗鉴权、只读 `.git` packfile 安全清理（`rmtree_safe`）、中文 `CP936`/`GB18030` 编码兼容，以及 `init --discover-global-dirs`、`scan`/`diagnose`、`adopt`、`remediate` 一体化整理。 | 让习惯在 Windows PowerShell / CMD 下使用的用户开箱即用，不再卡死或报错；同时让机器上已经装了几十个历史 skill 的老用户，装上插件就能一键盘点、查重并收编清理。 |
+| **`v0.1.0`** | **三层技能策展基础架构**：上线 Global Core / 拷贝隔离 Project Workspace / 零开销 Skill Vault（`INDEX.md` + 场景标签）、`fetch -> inspect -> store -> mount` / `search` / `demote` / `health` 全套 CLI，以及 `PreInvocation` / `UserPromptSubmit` 贴链接自动拦截。 | 彻底告别“见一个装一个导致全局上下文越来越臃肿、删了又找不到原地址”的痛点，入库前先审计质量与脚本，用项目和场景标签按需复制挂载。 |
 
 ---
 
