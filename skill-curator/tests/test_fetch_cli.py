@@ -19,6 +19,8 @@ SCRIPTS_DIR = (
     / "scripts"
 )
 CURATOR_SCRIPT = SCRIPTS_DIR / "curator.py"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 
 
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
@@ -34,7 +36,13 @@ class TestCuratorFetchCli(unittest.TestCase):
         self.dest_dir.mkdir(parents=True, exist_ok=True)
 
     def tearDown(self) -> None:
-        self._tmpdir.cleanup()
+        from common import rmtree_safe
+
+        rmtree_safe(self.root, ignore_errors=True)
+        try:
+            self._tmpdir.cleanup()
+        except OSError:
+            rmtree_safe(self.root, ignore_errors=True)
 
     def run_cli(
         self,
@@ -50,6 +58,8 @@ class TestCuratorFetchCli(unittest.TestCase):
             [sys.executable, str(CURATOR_SCRIPT), *args],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             env=env,
             timeout=timeout,
         )
@@ -69,6 +79,8 @@ class TestCuratorFetchCli(unittest.TestCase):
             cwd=str(cwd),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             env=env,
             timeout=10,
         )
@@ -96,7 +108,12 @@ class TestCuratorFetchCli(unittest.TestCase):
             for rel, link_target in symlinks.items():
                 target = work / rel
                 target.parent.mkdir(parents=True, exist_ok=True)
-                os.symlink(link_target, target)
+                try:
+                    os.symlink(link_target, target)
+                except OSError as exc:
+                    if getattr(exc, "winerror", None) == 1314:
+                        self.skipTest("Windows symlink creation requires Developer Mode or Administrator privileges")
+                    raise
 
         self._git(work, "add", "-A")
         self._git(work, "commit", "-m", "initial")
@@ -168,7 +185,7 @@ class TestCuratorFetchCli(unittest.TestCase):
 
         # Without --skill: returns inventory and does NOT stage files.
         inv_proc = self.run_cli(
-            ["fetch", f"file://{bare}", "--dest-dir", str(self.dest_dir)]
+            ["fetch", bare.as_uri(), "--dest-dir", str(self.dest_dir)]
         )
         self.assertEqual(inv_proc.returncode, 0, msg=inv_proc.stderr)
         inv = json.loads(inv_proc.stdout)
@@ -185,7 +202,7 @@ class TestCuratorFetchCli(unittest.TestCase):
         sel_proc = self.run_cli(
             [
                 "fetch",
-                f"file://{bare}",
+                bare.as_uri(),
                 "--skill",
                 "beta-skill",
                 "--dest-dir",
@@ -204,7 +221,7 @@ class TestCuratorFetchCli(unittest.TestCase):
         rel_proc = self.run_cli(
             [
                 "fetch",
-                f"file://{bare}",
+                bare.as_uri(),
                 "--skill",
                 "skills/alpha-skill",
                 "--dest-dir",
@@ -221,7 +238,7 @@ class TestCuratorFetchCli(unittest.TestCase):
         all_proc = self.run_cli(
             [
                 "fetch",
-                f"file://{bare}",
+                bare.as_uri(),
                 "--all",
                 "--dest-dir",
                 str(all_dest),
@@ -240,7 +257,7 @@ class TestCuratorFetchCli(unittest.TestCase):
 
         # Combining --all and --skill is rejected cleanly.
         bad_combo = self.run_cli(
-            ["fetch", f"file://{bare}", "--all", "--skill", "alpha-skill"]
+            ["fetch", bare.as_uri(), "--all", "--skill", "alpha-skill"]
         )
         self.assertNotEqual(bad_combo.returncode, 0)
 
@@ -298,7 +315,7 @@ class TestCuratorFetchCli(unittest.TestCase):
                 "--dest-dir",
                 str(tree_dest),
             ],
-            env_overrides={"SKILL_CURATOR_GITHUB_BASE_URL": f"file://{self.root}"},
+            env_overrides={"SKILL_CURATOR_GITHUB_BASE_URL": self.root.as_uri()},
         )
         self.assertEqual(tree_proc.returncode, 0, msg=tree_proc.stderr)
         tree_out = json.loads(tree_proc.stdout)

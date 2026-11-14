@@ -18,10 +18,14 @@ from auditor import (
     scan_global_core,
 )
 from common import (
+    STANDARD_HARNESS_SPECS,
     CuratorError,
     copy_tree_clean,
     parse_frontmatter,
     read_index_rows,
+    resolve_home_dir,
+    rmtree_safe,
+    tree_content_digest,
     upsert_index_row,
     utc_now_iso,
     validate_skill_name,
@@ -342,11 +346,39 @@ def mount_by_tag(
     }
 
 
+def ensure_no_diverged_duplicates(
+    existing: list[Path], skill_name: str, force: bool
+) -> None:
+    """Reject removing multiple copies if any are missing/non-dirs or differ in content."""
+    if len(existing) <= 1 or force:
+        return
+    non_symlink_dirs = [p for p in existing if p.is_dir() and not p.is_symlink()]
+    if len(non_symlink_dirs) != len(existing) or len(
+        {tree_content_digest(p) for p in non_symlink_dirs}
+    ) > 1:
+        raise CuratorError(
+            f"Diverged duplicates detected for '{skill_name}' across {[str(p) for p in existing]}. "
+            "Inspect differences or pass --force to archive primary and remove all copies.",
+            payload={
+                "error_code": "DIVERGED_DUPLICATE",
+                "name": skill_name,
+                "paths": [str(p) for p in existing],
+            },
+        )
+
+
 def demote_skill(
     cfg: dict[str, Any],
     raw_name: str,
     source_tier: str,
     project_dir: Path | None = None,
+    *,
+    keywords: list[str] | None = None,
+    scene_tags: list[str] | None = None,
+    extra_global_dirs: list[str] | None = None,
+    home_dir: Path | None = None,
+    discover_global_dirs: bool = False,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Archive/update an active skill in Skill Vault and remove its active mount(s)."""
     cleaned_raw = raw_name.strip()
@@ -357,16 +389,30 @@ def demote_skill(
 
     if source_tier == "project":
         resolved_proj = project_dir if project_dir is not None else Path.cwd().resolve()
-        candidates = [
-            resolved_proj / ".agents" / "skills" / skill_name,
-            resolved_proj / ".claude" / "skills" / skill_name,
+        parent_dirs = [
+            resolved_proj / ".agents" / "skills",
+            resolved_proj / ".claude" / "skills",
         ]
     else:
-        candidates = [
-            Path(os.path.expanduser(d)).resolve() / skill_name
-            for d in cfg["global_core_dirs"]
-        ]
+        raw_parents: list[str] = list(cfg["global_core_dirs"])
+        if extra_global_dirs:
+            raw_parents.extend(extra_global_dirs)
+        if discover_global_dirs:
+            resolved_home = resolve_home_dir(home_dir)
+            for _, parts in STANDARD_HARNESS_SPECS:
+                cand_parent = resolved_home.joinpath(*parts)
+                if cand_parent.is_dir():
+                    raw_parents.append(str(cand_parent))
+        dedup_parents: list[Path] = []
+        seen_parents: set[str] = set()
+        for raw_dir in raw_parents:
+            p = Path(os.path.expanduser(raw_dir)).resolve()
+            if str(p) not in seen_parents:
+                seen_parents.add(str(p))
+                dedup_parents.append(p)
+        parent_dirs = dedup_parents
 
+    candidates = [p / skill_name for p in parent_dirs]
     existing = [p for p in candidates if p.exists() or p.is_symlink()]
     if not existing:
         raise CuratorError(
@@ -378,6 +424,8 @@ def demote_skill(
             raise CuratorError(
                 f"Refusing to demote external plugin bundle '{path.name}'."
             )
+
+    ensure_no_diverged_duplicates(existing, skill_name, force)
 
     primary = next((p for p in existing if (p / "SKILL.md").is_file()), None)
     if primary is None:
@@ -398,6 +446,7 @@ def demote_skill(
     index_row = read_index_rows(vault_dir / "INDEX.md").get(skill_name, {})
 
     keywords = _merge_str_lists(
+        keywords or [],
         existing_vault_meta.get("keywords", [])
         if isinstance(existing_vault_meta.get("keywords"), list)
         else [],
@@ -407,6 +456,7 @@ def demote_skill(
         else [],
     )
     scene_tags = _merge_str_lists(
+        scene_tags or [],
         existing_vault_meta.get("scene_tags", [])
         if isinstance(existing_vault_meta.get("scene_tags"), list)
         else [],
@@ -456,10 +506,7 @@ def demote_skill(
 
     removed_paths: list[str] = []
     for path in existing:
-        if path.is_symlink() or path.is_file():
-            path.unlink()
-        else:
-            shutil.rmtree(str(path))
+        rmtree_safe(path)
         removed_paths.append(str(path))
 
     return {

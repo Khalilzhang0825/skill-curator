@@ -3,7 +3,7 @@
     "PreInvocation": [
       {
         "type": "command",
-        "command": "python3 ./skills/skill-curator/scripts/hook_intercept.py",
+        "command": "cd . && \"./hooks/run-hook.cmd\" || sh \"./hooks/run-hook.cmd\"",
         "timeout": 10
       }
     ]

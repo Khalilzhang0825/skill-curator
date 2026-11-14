@@ -17,7 +17,7 @@ FIXED_MTIME = 1700000000  # Reproducible archive timestamps
 
 EXCLUDE_PARTS = {"tests", "__pycache__", ".git", ".pytest_cache"}
 EXCLUDE_NAMES = {".DS_Store"}
-EXECUTABLE_SCRIPTS = {"curator.py", "hook_intercept.py"}
+EXECUTABLE_SCRIPTS = {"curator.py", "hook_intercept.py", "run-hook.cmd", "curator.cmd"}
 
 
 def collect_plugin_files(plugin_root: Path) -> list[Path]:
@@ -55,6 +55,9 @@ def build_archives() -> list[Path]:
         raise RuntimeError(f"No plugin files found in {PLUGIN_DIR}")
 
     DIST_DIR.mkdir(parents=True, exist_ok=True)
+    for old_archive in DIST_DIR.glob("skill-curator-v*"):
+        if old_archive.is_file():
+            old_archive.unlink()
     tar_path = DIST_DIR / f"{stem}.tar.gz"
     zip_path = DIST_DIR / f"{stem}.zip"
     sums_path = DIST_DIR / "SHA256SUMS.txt"

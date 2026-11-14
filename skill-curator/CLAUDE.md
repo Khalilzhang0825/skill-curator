@@ -1,6 +1,6 @@
 # Skill Curator (Claude Code Adapter)
 
-Follow the portable curation rules in [rules/AGENTS.md](./rules/AGENTS.md) and load the `skill-curator` skill (`skills/skill-curator/SKILL.md`) whenever the user shares a skill URL or asks to install, mount, search, demote, or audit skills.
+Follow the portable curation rules in [rules/AGENTS.md](./rules/AGENTS.md) and load the `skill-curator` skill (`skills/skill-curator/SKILL.md`) whenever the user shares a skill URL or asks to install, scan/clean up local skills, mount, search, demote, or audit skills.
 
 ## Claude Code Mirroring
 

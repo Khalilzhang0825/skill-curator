@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import locale
 import re
 import sys
 from urllib.parse import urlparse
@@ -28,14 +29,16 @@ CURATOR_TERM_RE = re.compile(
     re.IGNORECASE,
 )
 EN_SKILL_INTENT_RE = re.compile(
-    r"\b(?:install|add|curate|mount|unmount|demote|search|find|lookup|audit|check|inspect|health)\b"
+    r"\b(?:install|add|curate|mount|unmount|demote|search|find|lookup|audit|check|inspect|health|"
+    r"scan|diagnose|clean(?:\s*up)?|cleanup|deduplicate|dedup|reorganize|organize|adopt|onboard|init(?:ialize)?)\b"
     r".{0,48}\bskills?\b"
-    r"|\bskills?\b.{0,32}\b(?:install|mount|demote|audit|health|search|vault)\b",
+    r"|\bskills?\b.{0,32}\b(?:install|mount|demote|audit|health|search|vault|scan|diagnose|cleanup|deduplicate|adopt|onboard)\b",
     re.IGNORECASE,
 )
 CN_SKILL_INTENT_RE = re.compile(
-    r"(?:帮我装|装一下|装一?个|安装|挂载|收集|整理|导入|入库|归档|搜索|查找|审计|检查|健康检查|体检|降级|卸载).{0,24}(?:skills?|技能)"
-    r"|(?:skills?|技能).{0,24}(?:入库|归档|安装|挂载|健康检查|体检|审计|降级|卸载|搜索|查找)",
+    r"(?:帮我装|装一下|装一?个|安装|挂载|收集|整理|导入|入库|归档|搜索|查找|审计|检查|健康检查|体检|降级|卸载|"
+    r"扫描|诊断|去重|清理|排查|盘点|纳管|接管|初始化).{0,24}(?:skills?|技能)"
+    r"|(?:skills?|技能).{0,24}(?:入库|归档|安装|挂载|健康检查|体检|审计|降级|卸载|搜索|查找|扫描|诊断|去重|清理|整理|纳管)",
     re.IGNORECASE,
 )
 
@@ -78,9 +81,9 @@ def build_reminder(urls: list[str]) -> str:
         "[skill-curator] Skill curation intent detected."
         f"{url_note} Load the `skill-curator` skill (`SKILL.md`) before taking action. "
         "NEVER dump skills directly into `~/.agents/skills` or `~/.claude/skills`. "
-        "Follow `fetch` -> `inspect` -> present one concise audit/tier recommendation for user confirmation "
-        "-> `store` into Skill Vault (plus copy-based `mount` or `mount-tag` if requested). "
-        "For Vault lookup or cleanup, use `search` or `health` + user-confirmed `demote`."
+        "For external skills, run `fetch` -> `inspect` -> confirm plan -> `store` (plus copy `mount`). "
+        "For local skill discovery/cleanup, run `scan` -> confirm plan -> `remediate` / `adopt` / `demote`. "
+        "For Vault lookup or audits, use `search` or `health`."
     )
 
 
@@ -129,9 +132,43 @@ def process_payload(payload: object) -> dict[str, object]:
     return {"injectSteps": [{"systemMessage": {"systemMessage": reminder}}]}
 
 
-def main() -> int:
+def _ensure_utf8_stdio() -> None:
+    """Reconfigure standard streams to UTF-8 so non-ASCII prompts work under any locale."""
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
+def _decode_stdin_bytes(raw_bytes: bytes) -> str:
+    """Decode hook stdin trying UTF-8, OS preferred encoding, then GB18030."""
     try:
-        raw = sys.stdin.read()
+        return raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    preferred = locale.getpreferredencoding(False) or ""
+    candidates: list[str] = []
+    for enc in (preferred, "gb18030"):
+        if enc and enc.lower() not in ("utf-8", "utf8", "ascii") and enc.lower() not in [c.lower() for c in candidates]:
+            candidates.append(enc)
+    for enc in candidates:
+        try:
+            return raw_bytes.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw_bytes.decode("utf-8", errors="replace")
+
+
+def main() -> int:
+    _ensure_utf8_stdio()
+    try:
+        if hasattr(sys.stdin, "buffer"):
+            raw = _decode_stdin_bytes(sys.stdin.buffer.read())
+        else:
+            raw = sys.stdin.read()
         if not raw.strip():
             sys.stdout.write("{}\n")
             return 0

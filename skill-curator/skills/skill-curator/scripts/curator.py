@@ -14,8 +14,10 @@ from auditor import inspect_skill
 from common import (
     CuratorError,
     copy_tree_clean,
+    decode_raw_bytes,
     ensure_index_file,
     parse_frontmatter,
+    resolve_home_dir,
     rewrite_frontmatter_description,
     split_csv,
     upsert_index_row,
@@ -30,6 +32,13 @@ from lifecycle import (
     mount_by_tag,
     mount_vault_skill,
     search_vault,
+)
+from onboarding import (
+    adopt_skill,
+    discover_standard_global_dirs,
+    parse_remediate_plan_payload,
+    remediate_plan,
+    scan_local_skills,
 )
 
 VALID_CLAUDE_SYNC = ("auto", "always", "never")
@@ -56,7 +65,8 @@ def resolve_config_path(args: argparse.Namespace) -> Path:
         raw = os.environ.get("SKILL_CURATOR_CONFIG")
     if raw:
         return Path(os.path.expanduser(raw)).resolve()
-    default_cfg = DEFAULT_CONFIG_PATH.expanduser()
+    home_override = _optional_path(getattr(args, "home_dir", None))
+    default_cfg = resolve_home_dir(home_override) / ".config" / "skill-curator" / "config.json"
     if default_cfg.is_file():
         return default_cfg.resolve()
     raise CuratorError(
@@ -150,6 +160,21 @@ def cmd_init(args: argparse.Namespace) -> dict[str, Any]:
         "stale_days",
     )
 
+    discovered_dirs: list[dict[str, Any]] | None = None
+    if getattr(args, "discover_global_dirs", False):
+        discovered_dirs = discover_standard_global_dirs(_optional_path(getattr(args, "home_dir", None)))
+        discovered_paths = [entry["path"] for entry in discovered_dirs]
+        if discovered_paths:
+            merged_dirs: list[str] = []
+            seen_dirs: set[str] = set()
+            base_dirs = args.global_dir if args.global_dir is not None else existing_cfg.get("global_core_dirs", [])
+            for raw_d in [*base_dirs, *discovered_paths]:
+                resolved_d = str(Path(os.path.expanduser(raw_d)).resolve())
+                if resolved_d not in seen_dirs:
+                    seen_dirs.add(resolved_d)
+                    merged_dirs.append(raw_d if raw_d in base_dirs else resolved_d)
+            global_dirs = merged_dirs
+
     skills_dir.mkdir(parents=True, exist_ok=True)
     ensure_index_file(index_path)
 
@@ -163,7 +188,7 @@ def cmd_init(args: argparse.Namespace) -> dict[str, Any]:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(cfg_payload, indent=2) + "\n", encoding="utf-8")
 
-    return {
+    response: dict[str, Any] = {
         "ok": True,
         "action": "init",
         "vault_path": str(vault_dir),
@@ -172,6 +197,9 @@ def cmd_init(args: argparse.Namespace) -> dict[str, Any]:
         "index_path": str(index_path),
         "config": cfg_payload,
     }
+    if discovered_dirs is not None:
+        response["discovered_global_dirs"] = discovered_dirs
+    return response
 
 
 def cmd_store(args: argparse.Namespace) -> dict[str, Any]:
@@ -316,6 +344,98 @@ def cmd_search(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
+def _load_optional_config(args: argparse.Namespace) -> tuple[dict[str, Any] | None, bool]:
+    """Load config if present or explicitly requested; return (None, False) before init."""
+    explicit = getattr(args, "config_sub", None) or getattr(args, "config_top", None) or os.environ.get("SKILL_CURATOR_CONFIG")
+    if explicit:
+        return load_config(Path(os.path.expanduser(explicit)).resolve()), True
+    home_override = _optional_path(getattr(args, "home_dir", None))
+    default_cfg = resolve_home_dir(home_override) / ".config" / "skill-curator" / "config.json"
+    if default_cfg.is_file():
+        return load_config(default_cfg.resolve()), True
+    return None, False
+
+
+def cmd_scan(args: argparse.Namespace) -> dict[str, Any]:
+    """Scan local agent harness directories and generate diagnostics & remediation plan."""
+    cfg, config_loaded = _load_optional_config(args)
+    cap_override = (
+        _validate_positive_int(args.global_cap, "global_cap")
+        if args.global_cap is not None
+        else None
+    )
+    return scan_local_skills(
+        cfg=cfg,
+        config_loaded=config_loaded,
+        home_dir=_optional_path(args.home_dir),
+        scan_dirs=args.scan_dir,
+        project_dir=_optional_path(args.project_dir),
+        global_cap_override=cap_override,
+    )
+
+
+def cmd_adopt(args: argparse.Namespace) -> dict[str, Any]:
+    """Back up active skill(s) to Skill Vault and stamp active provenance metadata."""
+    cfg = load_config(resolve_config_path(args))
+    return adopt_skill(
+        cfg=cfg,
+        raw_name=args.name,
+        source_dir=_optional_path(args.source_dir),
+        tier=args.tier,
+        project_dir=_optional_path(args.project_dir),
+        home_dir=_optional_path(args.home_dir),
+        scan_dirs=args.scan_dir,
+        keywords=split_csv(args.keywords),
+        scene_tags=split_csv(args.tags),
+        source_url=(args.source_url or "").strip(),
+        override_description=args.override_description,
+    )
+
+
+def cmd_remediate(args: argparse.Namespace) -> dict[str, Any]:
+    """Execute user-confirmed onboarding/cleanup plan in one command."""
+    cfg = load_config(resolve_config_path(args))
+    adopt_items: list[dict[str, Any]] = []
+    demote_items: list[dict[str, Any]] = []
+
+    if args.plan:
+        if args.plan == "-":
+            if hasattr(sys.stdin, "buffer"):
+                raw_plan_text = decode_raw_bytes(sys.stdin.buffer.read())
+            else:
+                raw_plan_text = sys.stdin.read()
+        else:
+            plan_path = Path(os.path.expanduser(args.plan)).resolve()
+            if not plan_path.is_file():
+                raise CuratorError(f"Plan file not found: '{plan_path}'.")
+            raw_plan_text = plan_path.read_text(encoding="utf-8")
+        try:
+            plan_data = json.loads(raw_plan_text)
+        except json.JSONDecodeError as exc:
+            raise CuratorError(f"Invalid JSON plan: {exc}") from exc
+        if not isinstance(plan_data, dict):
+            raise CuratorError("Remediation JSON plan must be an object.")
+        parsed_adopt, parsed_demote = parse_remediate_plan_payload(plan_data)
+        adopt_items.extend(parsed_adopt)
+        demote_items.extend(parsed_demote)
+
+    for name in args.adopt or []:
+        adopt_items.append({"name": name})
+    for name in args.demote or []:
+        demote_items.append({"name": name})
+
+    return remediate_plan(
+        cfg=cfg,
+        adopt_items=adopt_items,
+        demote_items=demote_items,
+        home_dir=_optional_path(args.home_dir),
+        scan_dirs=args.scan_dir,
+        project_dir=_optional_path(args.project_dir),
+        dry_run=bool(args.dry_run),
+        force=bool(args.force),
+    )
+
+
 def cmd_demote(args: argparse.Namespace) -> dict[str, Any]:
     """Demote an active skill from Global Core or Project Workspace back to Skill Vault."""
     cfg = load_config(resolve_config_path(args))
@@ -324,6 +444,12 @@ def cmd_demote(args: argparse.Namespace) -> dict[str, Any]:
         raw_name=args.name,
         source_tier=args.source_tier,
         project_dir=_optional_path(args.project_dir),
+        keywords=split_csv(args.keywords) if args.keywords else None,
+        scene_tags=split_csv(args.tags) if args.tags else None,
+        extra_global_dirs=args.extra_global_dir,
+        home_dir=_optional_path(args.home_dir),
+        discover_global_dirs=bool(args.discover_global_dirs),
+        force=bool(args.force),
     )
 
 
@@ -374,6 +500,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Claude Code mirroring mode for project mounts.",
     )
     init_p.add_argument("--stale-days", type=int, default=None, help="Stale threshold in days.")
+    init_p.add_argument(
+        "--discover-global-dirs",
+        action="store_true",
+        help="Discover existing agent harness skill directories and include them in global_core_dirs.",
+    )
+    init_p.add_argument("--home-dir", default=None, help="Override home directory for discovery.")
     init_p.set_defaults(func=cmd_init)
 
     store_p = subparsers.add_parser(
@@ -489,7 +621,116 @@ def build_parser() -> argparse.ArgumentParser:
         help="Active tier to demote from.",
     )
     demote_p.add_argument("--project-dir", default=None, help="Project Workspace path.")
+    demote_p.add_argument("--keywords", default="", help="Comma-separated keywords to store.")
+    demote_p.add_argument("--tags", default="", help="Comma-separated Scene Tags to store.")
+    demote_p.add_argument("--home-dir", default=None, help="Override home directory for discovery.")
+    demote_p.add_argument(
+        "--extra-global-dir",
+        action="append",
+        default=None,
+        help="Additional global skill directory to demote from (repeatable).",
+    )
+    demote_p.add_argument(
+        "--discover-global-dirs",
+        action="store_true",
+        help="Also scan standard agent harness directories when archiving/removing.",
+    )
+    demote_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow archiving primary and removing diverged multi-harness duplicates.",
+    )
     demote_p.set_defaults(func=cmd_demote)
+
+    scan_p = subparsers.add_parser(
+        "scan",
+        aliases=["diagnose"],
+        parents=[config_parent],
+        help="Discover local skills across harnesses, diagnose issues, and recommend remediation.",
+    )
+    scan_p.add_argument("--home-dir", default=None, help="Override home directory for discovery.")
+    scan_p.add_argument(
+        "--scan-dir",
+        action="append",
+        default=None,
+        help="Additional skill directory to include in scan (repeatable).",
+    )
+    scan_p.add_argument("--project-dir", default=None, help="Project Workspace path.")
+    scan_p.add_argument("--global-cap", type=int, default=None, help="Override Global Core soft cap.")
+    scan_p.set_defaults(func=cmd_scan)
+
+    adopt_p = subparsers.add_parser(
+        "adopt",
+        parents=[config_parent],
+        help="Back up kept active skill(s) into Skill Vault and stamp provenance without removing.",
+    )
+    adopt_p.add_argument("name", nargs="?", default=None, help="Active skill name to adopt.")
+    adopt_p.add_argument("--source-dir", default=None, help="Explicit active skill directory path.")
+    adopt_p.add_argument(
+        "--tier",
+        choices=("global", "project"),
+        default="global",
+        help="Active tier of the kept skill.",
+    )
+    adopt_p.add_argument("--project-dir", default=None, help="Project Workspace path.")
+    adopt_p.add_argument("--home-dir", default=None, help="Override home directory for discovery.")
+    adopt_p.add_argument(
+        "--scan-dir",
+        action="append",
+        default=None,
+        help="Additional skill directory to search (repeatable).",
+    )
+    adopt_p.add_argument("--keywords", default="", help="Comma-separated capability keywords.")
+    adopt_p.add_argument("--tags", default="", help="Comma-separated Scene Tags.")
+    adopt_p.add_argument("--source-url", default="", help="Origin URL for provenance.")
+    adopt_p.add_argument(
+        "--override-description",
+        default=None,
+        help="Replace description in Vault copy only after explicit user confirmation.",
+    )
+    adopt_p.set_defaults(func=cmd_adopt)
+
+    rem_p = subparsers.add_parser(
+        "remediate",
+        parents=[config_parent],
+        help="Execute a user-confirmed local skill adoption and Vault-archival plan.",
+    )
+    rem_p.add_argument(
+        "--adopt",
+        action="append",
+        default=None,
+        help="Skill name to keep active and adopt into Vault (repeatable).",
+    )
+    rem_p.add_argument(
+        "--demote",
+        action="append",
+        default=None,
+        help="Skill name to archive into Vault and remove from active mounts (repeatable).",
+    )
+    rem_p.add_argument(
+        "--plan",
+        default=None,
+        help="Path to JSON remediation plan file (or '-' for stdin).",
+    )
+    rem_p.add_argument("--home-dir", default=None, help="Override home directory for discovery.")
+    rem_p.add_argument(
+        "--scan-dir",
+        action="append",
+        default=None,
+        help="Additional skill directory to include (repeatable).",
+    )
+    rem_p.add_argument("--project-dir", default=None, help="Project Workspace path.")
+    rem_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview planned adopt/demote actions without writing or deleting files.",
+    )
+    rem_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow demoting diverged duplicates across multiple harnesses.",
+    )
+    rem_p.set_defaults(func=cmd_remediate)
 
     health_p = subparsers.add_parser(
         "health",
@@ -505,7 +746,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _ensure_utf8_stdio() -> None:
+    """Reconfigure standard streams to UTF-8 to avoid CP936/CP1252 locale crashes."""
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _ensure_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
@@ -514,9 +767,9 @@ def main(argv: list[str] | None = None) -> int:
         err_body: dict[str, Any] = {"ok": False, "error": str(exc)}
         if exc.payload:
             err_body.update(exc.payload)
-        sys.stderr.write(json.dumps(err_body) + "\n")
+        sys.stderr.write(json.dumps(err_body, ensure_ascii=False) + "\n")
         return 1
-    sys.stdout.write(json.dumps(result, indent=2) + "\n")
+    sys.stdout.write(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
     return 0
 
 

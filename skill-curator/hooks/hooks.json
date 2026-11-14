@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/skill-curator/scripts/hook_intercept.py\"",
+            "command": "cd . && \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" || sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\"",
             "timeout": 10
           }
         ]

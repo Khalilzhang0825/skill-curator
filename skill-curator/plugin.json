@@ -1,11 +1,11 @@
 {
   "name": "skill-curator",
   "displayName": "Skill Curator",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Cross-agent skill curation across Global Core, Project Workspace, and out-of-band Skill Vault.",
   "logo": "assets/logo.png",
   "suggestedPrompts": [
-    "Initialize my Skill Vault and Global Core configuration",
+    "Initialize my Skill Vault and scan/organize my existing local skills",
     "Search my Skill Vault or mount a Scene Tag into this project",
     "Run a health audit on my Global Core and Project Workspace skills"
   ]

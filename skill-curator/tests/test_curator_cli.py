@@ -42,9 +42,19 @@ class TestCuratorCliVaultAndMount(unittest.TestCase):
             [sys.executable, str(CURATOR_SCRIPT), *args],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             env=env,
             timeout=15,
         )
+
+    def _symlink_or_skip(self, target: Path, link_path: Path) -> None:
+        try:
+            os.symlink(target, link_path)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                self.skipTest("Windows symlink creation requires Developer Mode or Administrator privileges")
+            raise
 
     def create_sample_skill(
         self,
@@ -371,7 +381,7 @@ class TestCuratorCliVaultAndMount(unittest.TestCase):
         secret_file.write_text("top-secret", encoding="utf-8")
 
         src_skill = self.create_sample_skill(self.root / "incoming", slug="sneaky-skill")
-        os.symlink(secret_file, src_skill / "leaked.txt")
+        self._symlink_or_skip(secret_file, src_skill / "leaked.txt")
 
         proc = self.run_cli(
             [
@@ -389,7 +399,7 @@ class TestCuratorCliVaultAndMount(unittest.TestCase):
         outside_dir.mkdir()
         (outside_dir / "data.txt").write_text("secret-dir", encoding="utf-8")
         dir_escape_skill = self.create_sample_skill(self.root / "incoming", slug="dir-escape")
-        os.symlink(outside_dir, dir_escape_skill / "refs")
+        self._symlink_or_skip(outside_dir, dir_escape_skill / "refs")
 
         proc_dir = self.run_cli(
             [
@@ -648,7 +658,7 @@ class TestCuratorCliVaultAndMount(unittest.TestCase):
 
         outside = self.root / "outside.txt"
         outside.write_text("outside", encoding="utf-8")
-        os.symlink(outside, self.vault_dir / "skills" / "tampered-skill" / "escape.txt")
+        self._symlink_or_skip(outside, self.vault_dir / "skills" / "tampered-skill" / "escape.txt")
 
         proc = self.run_cli(
             [

@@ -141,7 +141,7 @@ npx skills add Khalilzhang0825/skill-curator --skill skill-curator --copy
 
 ### Option 2: Antigravity (Full Plugin with PreInvocation Hook + Rules + Logo)
 
-Install from a GitHub Release archive (`skill-curator-v0.1.0.tar.gz` / `.zip`) or build from source:
+Install from a GitHub Release archive (`skill-curator-v0.1.1.tar.gz` / `.zip`) or build from source:
 
 ```bash
 # 1. Clone the repository and build the clean runtime archive (or download from GitHub Releases)
@@ -149,17 +149,35 @@ git clone https://github.com/Khalilzhang0825/skill-curator.git skill-curator-rep
 cd skill-curator-repo
 python3 ./scripts/package.py
 
-# 2. Extract into Antigravity's global plugins folder
+# 2. Extract into Antigravity's global plugins folder (macOS / Linux)
 mkdir -p ~/.gemini/config/plugins
-tar -xzf ./dist/skill-curator-v0.1.0.tar.gz -C ~/.gemini/config/plugins
+tar -xzf ./dist/skill-curator-v0.1.1.tar.gz -C ~/.gemini/config/plugins
 
-# 3. Initialize your Skill Vault & config (~/.config/skill-curator/config.json)
-python3 ~/.gemini/config/plugins/skill-curator/skills/skill-curator/scripts/curator.py init \
+# 3. Initialize your Skill Vault, discover existing harness dirs, and scan local skills
+~/.gemini/config/plugins/skill-curator/skills/skill-curator/scripts/curator.cmd init \
   --vault ~/.agents/skill-vault \
-  --global-dir ~/.agents/skills \
-  --global-dir ~/.gemini/config/skills \
+  --discover-global-dirs \
   --config ~/.config/skill-curator/config.json
+
+~/.gemini/config/plugins/skill-curator/skills/skill-curator/scripts/curator.cmd scan
 ```
+
+**Windows (PowerShell)**:
+
+```powershell
+py -3 .\scripts\package.py
+New-Item -ItemType Directory -Force -Path "$HOME\.gemini\config\plugins" | Out-Null
+Expand-Archive -Path ".\dist\skill-curator-v0.1.1.zip" -DestinationPath "$HOME\.gemini\config\plugins" -Force
+
+& "$HOME\.gemini\config\plugins\skill-curator\skills\skill-curator\scripts\curator.cmd" init `
+  --vault "$HOME\.agents\skill-vault" `
+  --discover-global-dirs `
+  --config "$HOME\.config\skill-curator\config.json"
+
+& "$HOME\.gemini\config\plugins\skill-curator\skills\skill-curator\scripts\curator.cmd" scan
+```
+
+*(In Windows `cmd.exe`, substitute `%USERPROFILE%` for `$HOME`.)*
 
 Start a new Antigravity conversation (or toggle `skill-curator` in Customizations). Antigravity automatically loads `plugin.json`, `hooks.json` (`PreInvocation`), `rules/AGENTS.md`, `assets/logo.png`, and `skills/skill-curator/SKILL.md`.
 
@@ -203,6 +221,8 @@ python3 ~/.agents/skills/skill-curator/scripts/curator.py init \
 
 Once installed, simply talk to your agent naturally:
 
+- **Onboard & clean up pre-existing local skills across harnesses**:
+  > *"Scan my existing local skills, keep at most 8 clean core ones, and archive the rest with Scene Tags"*
 - **Collect from GitHub (full repo, `/tree/` subdirectory, or `/blob/.../SKILL.md`)**:
   > *"https://github.com/owner/repo install this skill"*
 - **Search your Vault later in another project**:
@@ -212,21 +232,24 @@ Once installed, simply talk to your agent naturally:
 - **Run a periodic hygiene audit**:
   > *"Run a health audit on my Global Core and current project skills"*
 
-### 2. CLI Reference (`curator.py`)
+### 2. CLI Reference (`curator.cmd` / `curator.py`)
 
 Every command supports `--config <path>` or `SKILL_CURATOR_CONFIG` (default fallback: `~/.config/skill-curator/config.json`) and outputs structured JSON.
 
 | Command | Purpose | Example |
 | --- | --- | --- |
-| `init` | Initialize Skill Vault, `INDEX.md`, and `config.json` | `curator.py init --vault ~/.agents/skill-vault --global-cap 8` |
-| `fetch` | Clone/download a skill URL or return multi-skill inventory (`--all` stages all in 1 clone) | `curator.py fetch "https://github.com/owner/repo" --all --timeout 30` |
-| `inspect` | Audit naming, description, line count, scripts, overlaps, and cap | `curator.py inspect --source-dir /tmp/staged/my-skill --project-dir .` |
-| `store` | Save vetted skill into Skill Vault and upsert `INDEX.md` | `curator.py store --source-dir /tmp/staged/my-skill --keywords "pdf,ocr" --tags "docs" --source-url "..."` |
-| `mount` | Copy-mount a Vault skill into `project` or `global` (cap-gated) | `curator.py mount my-skill --target project --project-dir .` |
-| `mount-tag` | Batch copy-mount all Vault skills sharing a Scene Tag into a project | `curator.py mount-tag writing --project-dir .` |
-| `search` | Search Vault by English/Chinese keywords, description, or `--tag` | `curator.py search "公众号排版" --limit 10` |
-| `demote` | Archive an active skill into Skill Vault and remove active mounts | `curator.py demote my-skill --from global` |
-| `health` | Audit active skills for cap, duplicates, bloat, and stale `mounted_at` | `curator.py health --project-dir . --stale-days 30` |
+| `init` | Initialize Vault, `INDEX.md`, and `config.json` (`--discover-global-dirs` auto-detects harnesses) | `curator.cmd init --vault ~/.agents/skill-vault --discover-global-dirs` |
+| `scan` (`diagnose`) | Discover local skills across 8 harness dirs (works before `init`), diagnose cap/dups/bloat | `curator.cmd scan --project-dir .` |
+| `adopt` | Back up kept local skills to Vault + stamp provenance without removing active copies | `curator.cmd adopt my-core --keywords "lint" --tags "core"` |
+| `remediate` | Execute confirmed `--adopt`/`--demote` flags or JSON `--plan` (`--dry-run` preview supported) | `curator.cmd remediate --adopt core-a --demote heavy-pdf` |
+| `fetch` | Clone/download a skill URL or return multi-skill inventory (`--all` stages all in 1 clone) | `curator.cmd fetch "https://github.com/owner/repo" --all --timeout 30` |
+| `inspect` | Audit naming, description, line count, scripts, overlaps, and cap | `curator.cmd inspect --source-dir /tmp/staged/my-skill --project-dir .` |
+| `store` | Save vetted skill into Skill Vault and upsert `INDEX.md` | `curator.cmd store --source-dir /tmp/staged/my-skill --keywords "pdf,ocr" --tags "docs"` |
+| `mount` | Copy-mount a Vault skill into `project` or `global` (cap-gated) | `curator.cmd mount my-skill --target project --project-dir .` |
+| `mount-tag` | Batch copy-mount all Vault skills sharing a Scene Tag into a project | `curator.cmd mount-tag writing --project-dir .` |
+| `search` | Search Vault by English/Chinese keywords, description, or `--tag` | `curator.cmd search "公众号排版" --limit 10` |
+| `demote` | Archive active skill(s) into Vault (`--discover-global-dirs` checks duplicates) and remove mounts | `curator.cmd demote my-skill --from global --discover-global-dirs` |
+| `health` | Audit active skills for cap, duplicates, bloat, and stale `mounted_at` | `curator.cmd health --project-dir . --stale-days 30` |
 
 <details>
 <summary>Configuration Schema &amp; Vault <code>INDEX.md</code> Format</summary>
@@ -264,9 +287,10 @@ Default config (`~/.config/skill-curator/config.json`):
 ## Security & Safety Guarantees
 
 - **Path Containment**: `fetch`, `store`, `mount`, `inspect`, and `demote` resolve every entry with `os.path.realpath` and abort on any broken symlink or path escaping the skill root.
-- **No Auth / Hang Traps**: `git` invocations set `GIT_TERMINAL_PROMPT=0` and `GIT_ASKPASS=/bin/echo` with explicit subprocess `--timeout` limits so background runs never hang on password prompts or dead sockets.
-- **Fail-Open Hook**: Invalid/empty hook stdin, continuation steps (`invocationNum >= 1`), or unrelated coding prompts exit `0` with `{}`.
-- **Protected Targets**: `demote` refuses to remove `skill-curator` itself or external plugin bundles (`plugin.json`, `.claude-plugin/plugin.json`, `gemini-extension.json`), and `scan_global_core` excludes them from the 8-skill Global Core cap.
+- **No Auth / Hang Traps**: `git` invocations set `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, `GIT_ASKPASS=""`, `SSH_ASKPASS=""`, `SSH_ASKPASS_REQUIRE=never`, and `-c core.askPass= -c credential.interactive=never` with explicit `--timeout` limits and `DEVNULL` stdin so Windows/macOS/Linux runs never hang on password prompts or popups; missing `git`/`curl` emits structured `TOOL_NOT_FOUND` JSON.
+- **Diverged Duplicate Safety**: `demote` and `remediate` compare SHA-256 tree digests across multi-harness copies and refuse deletion when diverged unless `--force` is confirmed; read-only `.git` packfiles are removed cleanly via `rmtree_safe`.
+- **Fail-Open Hook & UTF-8 Safety**: Polyglot `hooks/run-hook.cmd` resolves `py -3` -> `python` -> `python3` (ignoring failing Windows Store stubs), forces UTF-8 stdio even under `CP936`/`C` locales, and exits `0` with `{}` on empty/malformed stdin, `invocationNum >= 1`, or coding prompts.
+- **Protected Targets**: `demote`, `adopt`, and `remediate` refuse to remove `skill-curator` itself or external plugin bundles (`plugin.json`, `.claude-plugin/plugin.json`, `gemini-extension.json`), and `scan_global_core` excludes them from the 8-skill Global Core cap.
 
 ---
 
@@ -274,6 +298,7 @@ Default config (`~/.config/skill-curator/config.json`):
 
 ```text
 .
+├── .gitattributes                     # Enforces LF line endings for polyglot .cmd / .py / .json / .md
 ├── README.md                          # English documentation
 ├── README.zh-CN.md                    # 简体中文文档
 ├── LICENSE                            # MIT License
@@ -282,18 +307,20 @@ Default config (`~/.config/skill-curator/config.json`):
 ├── scripts/package.py                 # Builds clean release .tar.gz / .zip / SHA256SUMS in dist/
 └── skill-curator/                     # Distributable cross-agent plugin bundle
     ├── plugin.json                    # Antigravity plugin manifest (references assets/logo.png)
-    ├── hooks.json                     # Antigravity PreInvocation hook config
+    ├── hooks.json                     # Antigravity PreInvocation hook config (calls hooks/run-hook.cmd)
     ├── assets/logo.png                # 512x512 Skill Curator icon
     ├── .claude-plugin/plugin.json     # Claude Code plugin manifest
-    ├── hooks/hooks.json               # Claude Code UserPromptSubmit hook config
+    ├── hooks/
+    │   ├── hooks.json                 # Claude Code UserPromptSubmit hook config
+    │   └── run-hook.cmd               # POSIX sh + Windows CMD polyglot launcher
     ├── CLAUDE.md                      # Claude Code rule adapter
     ├── rules/AGENTS.md                # Portable always-on curation rules
     ├── README.md                      # Standalone bundle quick reference
     ├── skills/skill-curator/
     │   ├── SKILL.md                   # Curator workflow instructions
     │   ├── references/                # config-schema.md & vault-index-template.md
-    │   └── scripts/                   # curator.py, fetcher.py, auditor.py, lifecycle.py, common.py, hook_intercept.py
-    └── tests/                         # 37 subprocess black-box tests (unittest, stdlib only)
+    │   └── scripts/                   # curator.cmd, curator.py, onboarding.py, fetcher.py, auditor.py, lifecycle.py, common.py, hook_intercept.py
+    └── tests/                         # 49 subprocess black-box tests (unittest, stdlib only)
 ```
 
 ### Run the Test Suite
@@ -302,6 +329,42 @@ Default config (`~/.config/skill-curator/config.json`):
 python3 -m unittest discover -s "./skill-curator/tests" -v
 ```
 
+<details>
+<summary>Windows Manual Test Checklist (PowerShell &amp; CMD, including Chinese <code>CP936</code> Locale)</summary>
+
+1. **Prerequisites (PowerShell)**:
+   ```powershell
+   py -3 --version; git --version; curl.exe --version
+   ```
+2. **Full Automated Test Suite (PowerShell)**:
+   ```powershell
+   py -3 -m unittest discover -s ".\skill-curator\tests" -v
+   ```
+3. **Package & Install Zip (PowerShell)**:
+   ```powershell
+   py -3 .\scripts\package.py
+   New-Item -ItemType Directory -Force -Path "$HOME\.gemini\config\plugins" | Out-Null
+   Expand-Archive -Path ".\dist\skill-curator-v0.1.1.zip" -DestinationPath "$HOME\.gemini\config\plugins" -Force
+   ```
+4. **Verify Polyglot Hook (`cmd.exe` `chcp 936` + PowerShell UTF-8)**:
+   ```cmd
+   chcp 936
+   cd /d "%USERPROFILE%\.gemini\config\plugins\skill-curator"
+   echo {"lastUserInput":"https://github.com/Nanako0129/sepia 帮我装一下"} | cmd /c "cd . && "./hooks/run-hook.cmd" || sh "./hooks/run-hook.cmd""
+   ```
+   ```powershell
+   '{"hook_event_name":"UserPromptSubmit","prompt":"扫描并整理我本地已有的 skills"}' | & "$HOME\.gemini\config\plugins\skill-curator\hooks\run-hook.cmd"
+   ```
+5. **Init + Discover + Scan + Dry-Run Remediate + Fetch Cleanup (PowerShell)**:
+   ```powershell
+   & "$HOME\.gemini\config\plugins\skill-curator\skills\skill-curator\scripts\curator.cmd" init --vault "$HOME\.agents\skill-vault" --discover-global-dirs --config "$HOME\.config\skill-curator\config.json"
+   & "$HOME\.gemini\config\plugins\skill-curator\skills\skill-curator\scripts\curator.cmd" scan
+   & "$HOME\.gemini\config\plugins\skill-curator\skills\skill-curator\scripts\curator.cmd" remediate --dry-run --adopt <core-skill> --demote <extra-skill>
+   & "$HOME\.gemini\config\plugins\skill-curator\skills\skill-curator\scripts\curator.cmd" fetch "https://github.com/Nanako0129/sepia" --timeout 30
+   ```
+
+</details>
+
 ### Build Distributable Archives
 
 ```bash
@@ -309,8 +372,8 @@ python3 ./scripts/package.py
 ```
 
 Generates clean runtime archives (excluding `__pycache__`, tests, and local scratch state) inside `./dist/`:
-- `skill-curator-v0.1.0.tar.gz`
-- `skill-curator-v0.1.0.zip`
+- `skill-curator-v0.1.1.tar.gz`
+- `skill-curator-v0.1.1.zip`
 - `SHA256SUMS.txt`
 
 ---

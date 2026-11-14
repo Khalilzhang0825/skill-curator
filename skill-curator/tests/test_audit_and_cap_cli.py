@@ -40,6 +40,8 @@ class TestCuratorAuditAndCapCli(unittest.TestCase):
             [sys.executable, str(CURATOR_SCRIPT), *args],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             env=env,
             timeout=15,
         )

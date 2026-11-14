@@ -21,6 +21,8 @@ class TestHooksAndPackaging(unittest.TestCase):
             input=raw_stdin,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
         )
 
@@ -81,6 +83,11 @@ class TestHooksAndPackaging(unittest.TestCase):
         self.assert_antigravity_triggered("Search my Skill Vault for database migration skills")
         self.assert_antigravity_triggered("给我的全局 skills 做个健康检查")
         self.assert_antigravity_triggered("帮我装个画架构图的 skill")
+        self.assert_antigravity_triggered("Scan my local skills and clean up duplicates")
+        self.assert_antigravity_triggered("Onboard and adopt my existing skills into Skill Vault")
+        self.assert_antigravity_triggered("Initialize Skill Vault and diagnose installed skills")
+        self.assert_antigravity_triggered("扫描并整理我本地已有的 skills")
+        self.assert_antigravity_triggered("诊断一下我本地的技能并去重")
         self.assert_antigravity_triggered("https://github.com/vercel-labs/agent-skills", invocation_num=0)
 
         # CJK text stuck directly after URL without whitespace should not pollute URL
@@ -104,6 +111,8 @@ class TestHooksAndPackaging(unittest.TestCase):
         self.assert_antigravity_ignored("帮我修复 Header.tsx 的样式对齐问题")
         self.assert_antigravity_ignored("帮我把这段 skill 解析逻辑封装成函数")
         self.assert_antigravity_ignored("把这段配置封装成函数")
+        self.assert_antigravity_ignored("Write a function to scan local files and deduplicate entries")
+        self.assert_antigravity_ignored("Diagnose the database connection timeout in auth.py")
         self.assert_antigravity_ignored(
             "Fix https://github.com/acme/webapp/issues/42 and check "
             "https://github.com/acme/webapp/blob/main/src/app.py"
@@ -129,6 +138,8 @@ class TestHooksAndPackaging(unittest.TestCase):
         )
         self.assert_claude_triggered("帮我把 wechat-writing 场景标签的 skills 挂载到当前项目")
         self.assert_claude_triggered("Search my Skill Vault for database migration skills")
+        self.assert_claude_triggered("Diagnose my local skills across harnesses")
+        self.assert_claude_triggered("扫描并整理我本地已有的 skills")
 
         # Non-triggers
         self.assert_claude_ignored("Refactor JWT middleware in auth.py")
@@ -148,6 +159,7 @@ class TestHooksAndPackaging(unittest.TestCase):
         # 1) Manifests
         agy_manifest = json.loads((PLUGIN_ROOT / "plugin.json").read_text(encoding="utf-8"))
         self.assertEqual(agy_manifest["name"], "skill-curator")
+        self.assertEqual(agy_manifest["version"], "0.1.1")
         self.assertLessEqual(
             set(agy_manifest.keys()),
             {
@@ -170,19 +182,23 @@ class TestHooksAndPackaging(unittest.TestCase):
             (PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
         )
         self.assertEqual(claude_manifest["name"], "skill-curator")
+        self.assertEqual(claude_manifest["version"], "0.1.1")
 
         # 2) Antigravity hooks.json + shell execution from plugin root
         agy_hooks = json.loads((PLUGIN_ROOT / "hooks.json").read_text(encoding="utf-8"))
         agy_cmd = agy_hooks["skill-curator-intercept"]["PreInvocation"][0]["command"]
         self.assertEqual(
-            agy_cmd, "python3 ./skills/skill-curator/scripts/hook_intercept.py"
+            agy_cmd, 'cd . && "./hooks/run-hook.cmd" || sh "./hooks/run-hook.cmd"'
         )
+        shell_runner = ["cmd", "/c", agy_cmd] if os.name == "nt" else ["sh", "-c", agy_cmd]
         agy_sh = subprocess.run(
-            ["sh", "-c", agy_cmd],
+            shell_runner,
             cwd=str(PLUGIN_ROOT),
             input=json.dumps({"lastUserInput": "https://github.com/vercel-labs/agent-skills"}),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
         )
         self.assertEqual(agy_sh.returncode, 0, msg=agy_sh.stderr)
@@ -193,11 +209,16 @@ class TestHooksAndPackaging(unittest.TestCase):
             (PLUGIN_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8")
         )
         claude_cmd = claude_hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
-        self.assertIn("${CLAUDE_PLUGIN_ROOT}", claude_cmd)
+        self.assertEqual(
+            claude_cmd,
+            'cd . && "${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd" || sh "${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd"',
+        )
         env = os.environ.copy()
         env["CLAUDE_PLUGIN_ROOT"] = str(PLUGIN_ROOT)
+        claude_exec = claude_cmd.replace("${CLAUDE_PLUGIN_ROOT}", "%CLAUDE_PLUGIN_ROOT%") if os.name == "nt" else claude_cmd
+        claude_runner = ["cmd", "/c", claude_exec] if os.name == "nt" else ["sh", "-c", claude_exec]
         claude_sh = subprocess.run(
-            ["sh", "-c", claude_cmd],
+            claude_runner,
             input=json.dumps(
                 {
                     "hook_event_name": "UserPromptSubmit",
@@ -207,6 +228,8 @@ class TestHooksAndPackaging(unittest.TestCase):
             env=env,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
         )
         self.assertEqual(claude_sh.returncode, 0, msg=claude_sh.stderr)
@@ -237,6 +260,8 @@ class TestHooksAndPackaging(unittest.TestCase):
                 [sys.executable, str(CURATOR_SCRIPT), "init", "--vault", str(vault)],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10,
             )
             self.assertEqual(init_proc.returncode, 0, msg=init_proc.stderr)
@@ -253,6 +278,8 @@ class TestHooksAndPackaging(unittest.TestCase):
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10,
             )
             self.assertEqual(insp_proc.returncode, 0, msg=insp_proc.stderr)
@@ -265,12 +292,16 @@ class TestHooksAndPackaging(unittest.TestCase):
             # 6) CONFIG_NOT_FOUND when no --config, no SKILL_CURATOR_CONFIG, and no default file in HOME
             iso_env = os.environ.copy()
             iso_env.pop("SKILL_CURATOR_CONFIG", None)
-            iso_env["HOME"] = str(tmp_root / "clean-home")
-            Path(iso_env["HOME"]).mkdir()
+            clean_home = tmp_root / "clean-home"
+            clean_home.mkdir()
+            iso_env["HOME"] = str(clean_home)
+            iso_env["USERPROFILE"] = str(clean_home)
             no_cfg = subprocess.run(
                 [sys.executable, str(CURATOR_SCRIPT), "health"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 env=iso_env,
                 timeout=10,
             )

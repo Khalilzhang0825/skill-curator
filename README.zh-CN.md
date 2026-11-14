@@ -142,7 +142,7 @@ npx skills add Khalilzhang0825/skill-curator --skill skill-curator --copy
 
 ### 方式二：Antigravity 完整插件安装（含 `PreInvocation` Hook + 规则 + 图标）
 
-可以直接下载 GitHub Releases 里的打包文件（`skill-curator-v0.1.0.tar.gz` / `.zip`），或者从源码仓库构建后解压到 `~/.gemini/config/plugins/skill-curator`：
+可以直接下载 GitHub Releases 里的打包文件（`skill-curator-v0.1.1.tar.gz` / `.zip`），或者从源码仓库构建后解压到 `~/.gemini/config/plugins/skill-curator`：
 
 ```bash
 # 1. 克隆仓库并构建纯净安装包（或直接从 GitHub Releases 下载）
@@ -150,17 +150,35 @@ git clone https://github.com/Khalilzhang0825/skill-curator.git skill-curator-rep
 cd skill-curator-repo
 python3 ./scripts/package.py
 
-# 2. 解压到 Antigravity 全局插件目录
+# 2. 解压到 Antigravity 全局插件目录（macOS / Linux）
 mkdir -p ~/.gemini/config/plugins
-tar -xzf ./dist/skill-curator-v0.1.0.tar.gz -C ~/.gemini/config/plugins
+tar -xzf ./dist/skill-curator-v0.1.1.tar.gz -C ~/.gemini/config/plugins
 
-# 3. 初始化个人冷库（Skill Vault）与配置文件
-python3 ~/.gemini/config/plugins/skill-curator/skills/skill-curator/scripts/curator.py init \
+# 3. 初始化冷库并自动发现已有各 Agent 技能目录，同时执行本地技能诊断扫描
+~/.gemini/config/plugins/skill-curator/skills/skill-curator/scripts/curator.cmd init \
   --vault ~/.agents/skill-vault \
-  --global-dir ~/.agents/skills \
-  --global-dir ~/.gemini/config/skills \
+  --discover-global-dirs \
   --config ~/.config/skill-curator/config.json
+
+~/.gemini/config/plugins/skill-curator/skills/skill-curator/scripts/curator.cmd scan
 ```
+
+**Windows（PowerShell）**：
+
+```powershell
+py -3 .\scripts\package.py
+New-Item -ItemType Directory -Force -Path "$HOME\.gemini\config\plugins" | Out-Null
+Expand-Archive -Path ".\dist\skill-curator-v0.1.1.zip" -DestinationPath "$HOME\.gemini\config\plugins" -Force
+
+& "$HOME\.gemini\config\plugins\skill-curator\skills\skill-curator\scripts\curator.cmd" init `
+  --vault "$HOME\.agents\skill-vault" `
+  --discover-global-dirs `
+  --config "$HOME\.config\skill-curator\config.json"
+
+& "$HOME\.gemini\config\plugins\skill-curator\skills\skill-curator\scripts\curator.cmd" scan
+```
+
+*（在 Windows `cmd.exe` 中请将 `$HOME` 替换为 `%USERPROFILE%`。）*
 
 安装后新开一个 Antigravity 对话即可生效（也可在 Customizations 页面查看图标并开关 `skill-curator` 插件）。
 
@@ -202,6 +220,8 @@ python3 ~/.agents/skills/skill-curator/scripts/curator.py init \
 
 ### 1. 日常对话用法（无需记忆命令）
 
+- **首次扫描并整理本机散落的已有技能（跨平台多 Agent 目录）**：
+  > “扫描并整理我本地已有的 skills，精选保留不超过 8 个全局核心，其余按场景标签归档到冷库”
 - **粘贴 GitHub 链接收集技能（支持仓库根、`/tree/` 子目录、`/blob/.../SKILL.md`）**：
   > “`https://github.com/owner/repo` 帮我装一下这个 Skills”
 - **在新项目里检索曾经存过的技能**：
@@ -212,21 +232,24 @@ python3 ~/.agents/skills/skill-curator/scripts/curator.py init \
   > “帮我体检一下全局和当前项目的 skills，看看有没有重叠或长期未用的”
   > “把 `xxx` 从全局降级放回冷库吧”
 
-### 2. CLI 命令行完整参考（`curator.py`）
+### 2. CLI 命令行完整参考（`curator.cmd` / `curator.py`）
 
 所有子命令均支持 `--config <path>` 或环境变量 `SKILL_CURATOR_CONFIG`（未传时自动读取 `~/.config/skill-curator/config.json`），输出均为结构化 JSON。
 
 | 子命令 | 用途 | 常用示例 |
 | --- | --- | --- |
-| `init` | 初始化 Skill Vault、`INDEX.md` 和 `config.json`（幂等） | `curator.py init --vault ~/.agents/skill-vault --global-cap 8` |
-| `fetch` | 拉取 GitHub URL / 本地仓库（`--all` 一次克隆批量暂存） | `curator.py fetch "https://github.com/owner/repo" --all --timeout 30` |
-| `inspect` | 安装前质量、脚本、跨层碰撞与全局上限预检查 | `curator.py inspect --source-dir /tmp/staged/my-skill --project-dir .` |
-| `store` | 校验并存入 Skill Vault，同步更新 `INDEX.md` | `curator.py store --source-dir /tmp/staged/my-skill --keywords "pdf,ocr" --tags "docs" --source-url "..."` |
-| `mount` | 从冷库复制挂载到项目或全局（受全局上限门禁保护） | `curator.py mount my-skill --target project --project-dir .` |
-| `mount-tag` | 按场景标签把一组技能批量复制挂载到当前项目 | `curator.py mount-tag writing --project-dir .` |
-| `search` | 按中英文关键词、描述或 `--tag` 检索冷库 | `curator.py search "公众号排版" --limit 10` |
-| `demote` | 将全局或项目技能归档回冷库，并清理原挂载副本 | `curator.py demote my-skill --from global` |
-| `health` | 检查全局超额、重名/关键词重叠、体积膨胀与 `mounted_at` 过期 | `curator.py health --project-dir . --stale-days 30` |
+| `init` | 初始化 Skill Vault、`INDEX.md` 和 `config.json`（`--discover-global-dirs` 自动探测各目录） | `curator.cmd init --vault ~/.agents/skill-vault --discover-global-dirs` |
+| `scan`（`diagnose`） | 跨 8 个本地 Agent 目录扫描技能（`init` 前即可运行），诊断超额、重复与膨胀 | `curator.cmd scan --project-dir .` |
+| `adopt` | 将保留的本地技能备份入库并写入出处元数据，不删除原目录或改动 `SKILL.md` | `curator.cmd adopt my-core --keywords "lint" --tags "core"` |
+| `remediate` | 经用户确认后一键执行 `--adopt`/`--demote` 或 `--plan`（支持 `--dry-run` 预演） | `curator.cmd remediate --adopt core-a --demote heavy-pdf` |
+| `fetch` | 拉取 GitHub URL / 本地仓库（`--all` 一次克隆批量暂存） | `curator.cmd fetch "https://github.com/owner/repo" --all --timeout 30` |
+| `inspect` | 安装前质量、脚本、跨层碰撞与全局上限预检查 | `curator.cmd inspect --source-dir /tmp/staged/my-skill --project-dir .` |
+| `store` | 校验并存入 Skill Vault，同步更新 `INDEX.md` | `curator.cmd store --source-dir /tmp/staged/my-skill --keywords "pdf,ocr" --tags "docs"` |
+| `mount` | 从冷库复制挂载到项目或全局（受全局上限门禁保护） | `curator.cmd mount my-skill --target project --project-dir .` |
+| `mount-tag` | 按场景标签把一组技能批量复制挂载到当前项目 | `curator.cmd mount-tag writing --project-dir .` |
+| `search` | 按中英文关键词、描述或 `--tag` 检索冷库 | `curator.cmd search "公众号排版" --limit 10` |
+| `demote` | 将全局/多目录技能归档回冷库并清理挂载副本（分叉重复需 `--force`） | `curator.cmd demote my-skill --from global --discover-global-dirs` |
+| `health` | 检查全局超额、重名/关键词重叠、体积膨胀与 `mounted_at` 过期 | `curator.cmd health --project-dir . --stale-days 30` |
 
 <details>
 <summary>配置文件（<code>config.json</code>）与冷库索引（<code>INDEX.md</code>）格式说明</summary>
@@ -264,9 +287,10 @@ python3 ~/.agents/skills/skill-curator/scripts/curator.py init \
 ## 安全与稳定性设计
 
 - **严格防软链越界**：`fetch`、`store`、`mount`、`inspect`、`demote` 全流程用 `os.path.realpath` 校验目录树，发现坏链接或指向技能目录之外的软链接立刻拒绝。
-- **防卡死守卫**：所有 `git` 调用强制设置 `GIT_TERMINAL_PROMPT=0` 与 `GIT_ASKPASS=/bin/echo`，并配合显式 `--timeout`，绝不因私有仓库鉴权弹窗或网络抖动挂死进程。
-- **Hook 故障安全（Fail-Open）**：遇到空输入、非 JSON 畸形输入、续调（`invocationNum >= 1`）或普通编码对话时，Hook 一律以退出码 `0` 返回 `{}`，不干扰正常开发。
-- **防误删保护**：`demote` 拒绝降级 `skill-curator` 自身以及任何外部插件包（含 `plugin.json` / `.claude-plugin/plugin.json` / `gemini-extension.json`），且全局上限计数同样自动排除它们。
+- **防卡死守卫（跨平台）**：所有 `git` 调用强制设置 `GIT_TERMINAL_PROMPT=0`、`GCM_INTERACTIVE=never`、`GIT_ASKPASS=""`、`SSH_ASKPASS=""`、`SSH_ASKPASS_REQUIRE=never` 与 `-c core.askPass= -c credential.interactive=never`，配合 `--timeout` 与 `DEVNULL` 标准输入，在 Windows/macOS/Linux 上均不会因鉴权弹窗卡死；缺少 `git`/`curl` 时返回结构化 `TOOL_NOT_FOUND` JSON。
+- **分叉重复与只读 Packfile 安全清理**：`demote` 与 `remediate` 通过 SHA-256 树摘要校验多工具目录中的同名副本，若内容已分叉则拒绝删除（除非显式 `--force`）；临时 `.git/objects/pack/*.pack` 只读文件通过 `rmtree_safe` 自动清只读属性后清理。
+- **Hook 故障安全（Fail-Open）与 UTF-8**：跨平台多义入口 `hooks/run-hook.cmd` 按 `py -3` -> `python` -> `python3` 探活解析，自动绕过失败的 Windows 应用商店 `python3.exe` 占位符，并在 `CP936`/`C` 等非 UTF-8 环境下强制切换为 UTF-8；畸形输入、续调（`invocationNum >= 1`）或普通编码对话一律返回 `{}`。
+- **防误删保护**：`demote`、`adopt` 与 `remediate` 拒绝处理 `skill-curator` 自身及外部插件包（含 `plugin.json` / `.claude-plugin/plugin.json` / `gemini-extension.json`），且全局上限计数同样自动排除它们。
 
 ---
 
@@ -274,6 +298,7 @@ python3 ~/.agents/skills/skill-curator/scripts/curator.py init \
 
 ```text
 .
+├── .gitattributes                     # 强制 .cmd / .py / .json / .md 保持 LF 换行
 ├── README.md                          # 英文文档
 ├── README.zh-CN.md                    # 简体中文文档（本文件）
 ├── LICENSE                            # MIT 开源协议
@@ -282,25 +307,63 @@ python3 ~/.agents/skills/skill-curator/scripts/curator.py init \
 ├── scripts/package.py                 # 一键构建纯净发布包（dist/*.tar.gz / *.zip / SHA256SUMS.txt）
 └── skill-curator/                     # 可直接分发安装的跨 Agent 插件主体
     ├── plugin.json                    # Antigravity 插件清单（引用 assets/logo.png）
-    ├── hooks.json                     # Antigravity PreInvocation Hook 配置
+    ├── hooks.json                     # Antigravity PreInvocation Hook 配置（调用 hooks/run-hook.cmd）
     ├── assets/logo.png                # 512x512 Skill Curator 图标
     ├── .claude-plugin/plugin.json     # Claude Code 插件清单
-    ├── hooks/hooks.json               # Claude Code UserPromptSubmit Hook 配置
+    ├── hooks/
+    │   ├── hooks.json                 # Claude Code UserPromptSubmit Hook 配置
+    │   └── run-hook.cmd               # POSIX sh + Windows CMD 跨平台入口
     ├── CLAUDE.md                      # Claude Code 规则适配
     ├── rules/AGENTS.md                # 跨 Agent 通用常驻规则
     ├── README.md                      # 插件包内附速查说明
     ├── skills/skill-curator/
     │   ├── SKILL.md                   # Skill Curator 核心工作流说明
     │   ├── references/                # 配置结构与冷库索引模板
-    │   └── scripts/                   # curator.py, fetcher.py, auditor.py, lifecycle.py, common.py, hook_intercept.py
-    └── tests/                         # 37 项黑盒回归测试（仅依赖标准库 unittest）
+    │   └── scripts/                   # curator.cmd, curator.py, onboarding.py, fetcher.py, auditor.py, lifecycle.py, common.py, hook_intercept.py
+    └── tests/                         # 49 项黑盒回归测试（仅依赖标准库 unittest）
 ```
 
-### 运行测试（全部 37 项子进程黑盒测试）
+### 运行测试（全部 49 项子进程黑盒测试）
 
 ```bash
 python3 -m unittest discover -s "./skill-curator/tests" -v
 ```
+
+<details>
+<summary>Windows 真机手工验收清单（PowerShell 与 CMD，含中文 <code>CP936</code> 环境）</summary>
+
+1. **环境检查（PowerShell）**：
+   ```powershell
+   py -3 --version; git --version; curl.exe --version
+   ```
+2. **运行全部自动化测试（PowerShell）**：
+   ```powershell
+   py -3 -m unittest discover -s ".\skill-curator\tests" -v
+   ```
+3. **构建并解压安装发布包（PowerShell）**：
+   ```powershell
+   py -3 .\scripts\package.py
+   New-Item -ItemType Directory -Force -Path "$HOME\.gemini\config\plugins" | Out-Null
+   Expand-Archive -Path ".\dist\skill-curator-v0.1.1.zip" -DestinationPath "$HOME\.gemini\config\plugins" -Force
+   ```
+4. **验证 Hook 跨平台启动器（`cmd.exe` `chcp 936` + PowerShell UTF-8）**：
+   ```cmd
+   chcp 936
+   cd /d "%USERPROFILE%\.gemini\config\plugins\skill-curator"
+   echo {"lastUserInput":"https://github.com/Nanako0129/sepia 帮我装一下"} | cmd /c "cd . && "./hooks/run-hook.cmd" || sh "./hooks/run-hook.cmd""
+   ```
+   ```powershell
+   '{"hook_event_name":"UserPromptSubmit","prompt":"扫描并整理我本地已有的 skills"}' | & "$HOME\.gemini\config\plugins\skill-curator\hooks\run-hook.cmd"
+   ```
+5. **初始化冷库、扫描诊断、预演整治与拉取清理（PowerShell）**：
+   ```powershell
+   & "$HOME\.gemini\config\plugins\skill-curator\skills\skill-curator\scripts\curator.cmd" init --vault "$HOME\.agents\skill-vault" --discover-global-dirs --config "$HOME\.config\skill-curator\config.json"
+   & "$HOME\.gemini\config\plugins\skill-curator\skills\skill-curator\scripts\curator.cmd" scan
+   & "$HOME\.gemini\config\plugins\skill-curator\skills\skill-curator\scripts\curator.cmd" remediate --dry-run --adopt <core-skill> --demote <extra-skill>
+   & "$HOME\.gemini\config\plugins\skill-curator\skills\skill-curator\scripts\curator.cmd" fetch "https://github.com/Nanako0129/sepia" --timeout 30
+   ```
+
+</details>
 
 ### 一键构建开源发布包
 
@@ -309,8 +372,8 @@ python3 ./scripts/package.py
 ```
 
 会在 `./dist/` 下生成剥离了缓存、`tests/` 与本地临时状态的纯净插件安装包：
-- `skill-curator-v0.1.0.tar.gz`
-- `skill-curator-v0.1.0.zip`
+- `skill-curator-v0.1.1.tar.gz`
+- `skill-curator-v0.1.1.zip`
 - `SHA256SUMS.txt`
 
 ---

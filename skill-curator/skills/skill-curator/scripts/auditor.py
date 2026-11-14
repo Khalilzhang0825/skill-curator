@@ -27,6 +27,7 @@ SCRIPT_EXTENSIONS = {
     ".pl",
     ".ps1",
     ".bat",
+    ".cmd",
 }
 
 STOPWORDS = {

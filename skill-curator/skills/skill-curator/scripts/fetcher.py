@@ -18,6 +18,7 @@ from common import (
     is_path_within,
     normalize_slug,
     parse_frontmatter,
+    rmtree_safe,
     validate_skill_name,
 )
 
@@ -151,23 +152,34 @@ def parse_source_url(
 
 
 def _git_env() -> dict[str, str]:
-    """Build non-interactive environment for git subprocesses."""
+    """Build cross-platform non-interactive environment for git subprocesses."""
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
-    env["GIT_ASKPASS"] = "/bin/echo"
+    env["GCM_INTERACTIVE"] = "never"
+    env["GIT_ASKPASS"] = ""
+    env["SSH_ASKPASS"] = ""
+    env["SSH_ASKPASS_REQUIRE"] = "never"
     return env
 
 
-def _run_git(args: list[str], timeout: float, label: str) -> subprocess.CompletedProcess[str]:
-    """Execute a git subprocess with hang and auth-prompt guards."""
+def _run_git(args: list[str], timeout: float, label: str = "command") -> subprocess.CompletedProcess[str]:
+    """Execute a git subprocess with hang, UTF-8, and auth-prompt guards."""
     try:
         proc = subprocess.run(
-            ["git", *args],
+            ["git", "-c", "core.askPass=", "-c", "credential.interactive=never", *args],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             env=_git_env(),
             timeout=timeout,
         )
+    except FileNotFoundError as exc:
+        raise CuratorError(
+            "Required tool 'git' was not found on PATH.",
+            payload={"error_code": "TOOL_NOT_FOUND", "tool": "git"},
+        ) from exc
     except subprocess.TimeoutExpired as exc:
         raise CuratorError(f"Git {label} timed out after {timeout:g}s.") from exc
     if proc.returncode != 0:
@@ -190,11 +202,13 @@ def _clone_repo(clone_url: str, dest: Path, ref: str | None, timeout: float) -> 
             "clone",
         )
     except CuratorError as exc:
+        if exc.payload.get("error_code") == "TOOL_NOT_FOUND":
+            raise
         msg = str(exc).lower()
         if "timed out" in msg:
             raise
         if dest.exists():
-            shutil.rmtree(str(dest), ignore_errors=True)
+            rmtree_safe(dest, ignore_errors=True)
         remaining = max(0.5, deadline - time.monotonic())
         _run_git(["clone", clone_url, str(dest)], remaining, "clone")
         remaining = max(0.5, deadline - time.monotonic())
@@ -210,16 +224,26 @@ def _resolve_dest_parent(dest_dir: str | None) -> Path:
     return Path(tempfile.mkdtemp(prefix="skill-curator-fetch-")).resolve()
 
 
-def _fetch_single_file(spec: dict[str, Any], dest_dir: str | None, timeout: float) -> dict[str, Any]:
+def _fetch_single_file(
+    spec: dict[str, Any] | str, dest_dir: Path | str | None, timeout: float
+) -> dict[str, Any]:
     """Download a single SKILL.md via curl and stage it cleanly."""
+    if isinstance(spec, str):
+        spec = parse_source_url(spec)
     raw_url = spec["raw_url"]
     max_time = str(max(1, int(round(timeout))))
     try:
         proc = subprocess.run(
             ["curl", "-fsSL", "--max-time", max_time, raw_url],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=timeout + 1.5,
         )
+    except FileNotFoundError as exc:
+        raise CuratorError(
+            "Required tool 'curl' was not found on PATH.",
+            payload={"error_code": "TOOL_NOT_FOUND", "tool": "curl"},
+        ) from exc
     except subprocess.TimeoutExpired as exc:
         raise CuratorError(f"Fetch timed out after {timeout:g}s for '{raw_url}'.") from exc
 
@@ -344,84 +368,87 @@ def fetch_source(
 
     with tempfile.TemporaryDirectory(prefix="skill-curator-clone-") as tmp_dir:
         clone_root = Path(tmp_dir) / "repo"
-        _clone_repo(spec["clone_url"], clone_root, ref=spec["ref"], timeout=timeout)
-        shutil.rmtree(str(clone_root / ".git"), ignore_errors=True)
+        try:
+            _clone_repo(spec["clone_url"], clone_root, ref=spec["ref"], timeout=timeout)
+            rmtree_safe(clone_root / ".git", ignore_errors=True)
 
-        search_root = clone_root
-        sub = spec["subpath"]
-        if sub:
-            candidate = clone_root / sub
-            if not is_path_within(
-                os.path.realpath(str(clone_root)), os.path.realpath(str(candidate))
-            ):
-                raise CuratorError(
-                    f"Security error: subpath '{sub}' escapes repository root."
-                )
-            if not candidate.is_dir():
-                raise CuratorError(f"Subpath '{sub}' not found in repository.")
-            search_root = candidate
-
-        discovered = _discover_skills(clone_root, search_root, spec["repo_slug"])
-        if not discovered:
-            raise CuratorError(f"No SKILL.md found in '{source}'.")
-
-        if fetch_all:
-            dest_parent = _resolve_dest_parent(dest_dir)
-            staged_skills: list[dict[str, Any]] = []
-            seen_names: set[str] = set()
-            for item in discovered:
-                skill_name = validate_skill_name(item["name"])
-                if skill_name in seen_names:
+            search_root = clone_root
+            sub = spec["subpath"]
+            if sub:
+                candidate = clone_root / sub
+                if not is_path_within(
+                    os.path.realpath(str(clone_root)), os.path.realpath(str(candidate))
+                ):
                     raise CuratorError(
-                        f"Duplicate normalized skill name '{skill_name}' in repository; use --skill <rel_path>."
+                        f"Security error: subpath '{sub}' escapes repository root."
                     )
-                seen_names.add(skill_name)
-                staged_dir = dest_parent / skill_name
-                copy_tree_clean(item["skill_dir"], staged_dir)
-                staged_skills.append(
-                    {
-                        "name": skill_name,
-                        "description": item["description"],
-                        "rel_path": item["rel_path"],
-                        "staged_dir": str(staged_dir),
-                    }
-                )
-            return {
-                "ok": True,
-                "action": "fetch",
-                "status": "fetched",
-                "requires_selection": False,
-                "source_url": spec["source_url"],
-                "staged_parent": str(dest_parent),
-                "skills": staged_skills,
-            }
+                if not candidate.is_dir():
+                    raise CuratorError(f"Subpath '{sub}' not found in repository.")
+                search_root = candidate
 
-        if len(discovered) > 1 and not skill_selector:
-            return {
-                "ok": True,
-                "action": "fetch",
-                "status": "multiple_skills_found",
-                "requires_selection": True,
-                "source_url": spec["source_url"],
-                "skills": [
-                    {
-                        "name": item["name"],
-                        "description": item["description"],
-                        "rel_path": item["rel_path"],
-                    }
-                    for item in discovered
-                ],
-            }
+            discovered = _discover_skills(clone_root, search_root, spec["repo_slug"])
+            if not discovered:
+                raise CuratorError(f"No SKILL.md found in '{source}'.")
 
-        selected = (
-            _select_skill(discovered, skill_selector, sub)
-            if skill_selector
-            else discovered[0]
-        )
-        skill_name = validate_skill_name(selected["name"])
-        dest_parent = _resolve_dest_parent(dest_dir)
-        staged_dir = dest_parent / skill_name
-        copy_tree_clean(selected["skill_dir"], staged_dir)
+            if fetch_all:
+                dest_parent = _resolve_dest_parent(dest_dir)
+                staged_skills: list[dict[str, Any]] = []
+                seen_names: set[str] = set()
+                for item in discovered:
+                    skill_name = validate_skill_name(item["name"])
+                    if skill_name in seen_names:
+                        raise CuratorError(
+                            f"Duplicate normalized skill name '{skill_name}' in repository; use --skill <rel_path>."
+                        )
+                    seen_names.add(skill_name)
+                    staged_dir = dest_parent / skill_name
+                    copy_tree_clean(item["skill_dir"], staged_dir)
+                    staged_skills.append(
+                        {
+                            "name": skill_name,
+                            "description": item["description"],
+                            "rel_path": item["rel_path"],
+                            "staged_dir": str(staged_dir),
+                        }
+                    )
+                return {
+                    "ok": True,
+                    "action": "fetch",
+                    "status": "fetched",
+                    "requires_selection": False,
+                    "source_url": spec["source_url"],
+                    "staged_parent": str(dest_parent),
+                    "skills": staged_skills,
+                }
+
+            if len(discovered) > 1 and not skill_selector:
+                return {
+                    "ok": True,
+                    "action": "fetch",
+                    "status": "multiple_skills_found",
+                    "requires_selection": True,
+                    "source_url": spec["source_url"],
+                    "skills": [
+                        {
+                            "name": item["name"],
+                            "description": item["description"],
+                            "rel_path": item["rel_path"],
+                        }
+                        for item in discovered
+                    ],
+                }
+
+            selected = (
+                _select_skill(discovered, skill_selector, sub)
+                if skill_selector
+                else discovered[0]
+            )
+            skill_name = validate_skill_name(selected["name"])
+            dest_parent = _resolve_dest_parent(dest_dir)
+            staged_dir = dest_parent / skill_name
+            copy_tree_clean(selected["skill_dir"], staged_dir)
+        finally:
+            rmtree_safe(clone_root, ignore_errors=True)
 
         return {
             "ok": True,

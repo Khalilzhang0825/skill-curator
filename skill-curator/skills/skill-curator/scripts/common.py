@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import locale
 import os
 import re
 import shutil
+import stat
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +20,72 @@ INDEX_TITLE = "# Skill Vault Index"
 INDEX_COLUMNS = "| Name | Keywords | Scene Tags | Source | Path |"
 INDEX_SEPARATOR = "| --- | --- | --- | --- | --- |"
 UNESCAPED_PIPE_RE = re.compile(r"(?<!\\)\|")
+
+STANDARD_HARNESS_SPECS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("agents", (".agents", "skills")),
+    ("claude", (".claude", "skills")),
+    ("antigravity", (".gemini", "config", "skills")),
+    ("antigravity-legacy", (".gemini", "antigravity", "skills")),
+    ("codex", (".codex", "skills")),
+    ("cursor", (".cursor", "skills")),
+    ("opencode", (".opencode", "skills")),
+    ("opencode", (".config", "opencode", "skills")),
+)
+
+
+def resolve_home_dir(home_dir: Path | None = None) -> Path:
+    """Resolve user home directory from explicit override or OS environment."""
+    if home_dir is not None:
+        return Path(os.path.expanduser(str(home_dir))).resolve()
+    if os.name == "nt":
+        env_home = os.environ.get("USERPROFILE") or os.environ.get("HOME")
+    else:
+        env_home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+    if env_home:
+        return Path(os.path.expanduser(env_home)).resolve()
+    return Path.home().resolve()
+
+
+def decode_raw_bytes(raw_bytes: bytes) -> str:
+    """Decode raw stdin bytes trying UTF-8, OS preferred encoding, then GB18030."""
+    try:
+        return raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    preferred = locale.getpreferredencoding(False) or ""
+    candidates: list[str] = []
+    for enc in (preferred, "gb18030"):
+        if enc and enc.lower() not in ("utf-8", "utf8", "ascii") and enc.lower() not in [c.lower() for c in candidates]:
+            candidates.append(enc)
+    for enc in candidates:
+        try:
+            return raw_bytes.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw_bytes.decode("utf-8", errors="replace")
+
+
+def tree_content_digest(skill_dir: Path) -> str:
+    """Compute a deterministic SHA-256 digest of skill files excluding .curator-meta.json."""
+    digest = hashlib.sha256()
+    resolved_root = skill_dir.resolve()
+    for dirpath, dirnames, filenames in os.walk(str(resolved_root), followlinks=False):
+        dirnames.sort()
+        for fname in sorted(filenames):
+            if fname == ".curator-meta.json":
+                continue
+            fpath = Path(dirpath) / fname
+            rel = fpath.relative_to(resolved_root).as_posix()
+            digest.update(rel.encode("utf-8", errors="replace"))
+            digest.update(b"\x00")
+            if fpath.is_symlink():
+                digest.update(b"L:" + os.readlink(str(fpath)).encode("utf-8", errors="replace"))
+            else:
+                with fpath.open("rb") as fh:
+                    for chunk in iter(lambda: fh.read(65536), b""):
+                        digest.update(chunk)
+            digest.update(b"\x00")
+    return digest.hexdigest()
 
 
 class CuratorError(Exception):
@@ -48,8 +118,10 @@ def validate_skill_name(name: str) -> str:
 
 def is_path_within(root_real: str, candidate_real: str) -> bool:
     """Return True if candidate_real is inside or equal to root_real."""
+    root_norm = os.path.normcase(os.path.normpath(root_real))
+    cand_norm = os.path.normcase(os.path.normpath(candidate_real))
     try:
-        return os.path.commonpath([root_real, candidate_real]) == root_real
+        return os.path.commonpath([root_norm, cand_norm]) == root_norm
     except ValueError:
         return False
 
@@ -74,6 +146,53 @@ def validate_tree_containment(root_dir: Path) -> None:
                 raise CuratorError(f"Broken symlink inside skill directory: '{entry}'.")
 
 
+def _make_writable(path: str) -> None:
+    """Clear read-only bits on path without touching symlink targets."""
+    if os.path.islink(path):
+        return
+    try:
+        mode = stat.S_IWRITE | stat.S_IREAD
+        if os.path.isdir(path):
+            mode |= stat.S_IEXEC
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
+def _handle_remove_readonly(func: Any, path: str, _exc: Any) -> None:
+    """Clear read-only attributes (such as .git packfiles) and retry removal."""
+    parent = os.path.dirname(path)
+    if parent:
+        _make_writable(parent)
+    _make_writable(path)
+    func(path)
+
+
+def rmtree_safe(target: Path | str, *, ignore_errors: bool = False) -> None:
+    """Remove files, directory symlinks/junctions, or read-only trees safely across OSes."""
+    target_str = str(target)
+    if not os.path.lexists(target_str):
+        return
+    try:
+        if os.path.islink(target_str):
+            try:
+                os.unlink(target_str)
+            except PermissionError:
+                os.rmdir(target_str)
+            return
+        if os.path.isfile(target_str):
+            _make_writable(target_str)
+            os.unlink(target_str)
+            return
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(target_str, onexc=_handle_remove_readonly)
+        else:
+            shutil.rmtree(target_str, onerror=_handle_remove_readonly)
+    except OSError:
+        if not ignore_errors:
+            raise
+
+
 def copy_tree_clean(src: Path, dst: Path) -> None:
     """Validate src containment and copy to dst without creating symlinks."""
     validate_tree_containment(src)
@@ -82,12 +201,12 @@ def copy_tree_clean(src: Path, dst: Path) -> None:
     try:
         staged = Path(tmp_parent) / dst.name
         shutil.copytree(str(src), str(staged), symlinks=False)
-        if dst.exists():
-            shutil.rmtree(str(dst))
+        if dst.exists() or os.path.islink(str(dst)):
+            rmtree_safe(dst)
         staged.rename(dst)
     finally:
         if os.path.exists(tmp_parent):
-            shutil.rmtree(tmp_parent, ignore_errors=True)
+            rmtree_safe(tmp_parent, ignore_errors=True)
 
 
 def _unquote_yaml_scalar(value: str) -> str:
